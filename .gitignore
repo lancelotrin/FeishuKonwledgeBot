@@ -1,0 +1,6 @@
+node_modules/
+.env
+*.log
+.idea/
+data/
+bot.config.json

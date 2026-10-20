@@ -1,0 +1,14 @@
+{
+  "name": "feishu-knowledge-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --env-file=.env bot.mjs",
+    "check": "node --env-file=.env bot.mjs --check",
+    "sync": "node --env-file=.env bot.mjs --sync",
+    "test": "node --test"
+  },
+  "dependencies": { "@larksuiteoapi/node-sdk": "1.74.0" }
+}
