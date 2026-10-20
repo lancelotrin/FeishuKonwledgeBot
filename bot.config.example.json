@@ -1,38 +1,101 @@
 {
   "systemPrompt": "你是 OnePiece 项目组的知识助手，熟悉团队飞书知识库和项目代码。回答准确、简洁，用中文。资料不足时明确说明并建议找谁确认，不要编造。",
-
   "wiki": [
-    { "name": "OnePiece 知识库", "url": "https://rcnc3bm8lc5c.feishu.cn/wiki/AzlmwaQjzitSa9kqzSec537Cnwd", "scope": "space" }
+    {
+      "name": "OnePiece 知识库",
+      "url": "https://rcnc3bm8lc5c.feishu.cn/wiki/AzlmwaQjzitSa9kqzSec537Cnwd",
+      "scope": "space"
+    }
   ],
-
   "projects": [
     {
       "name": "OnePiece",
       "root": "D:/OnePiece/onepiece",
-      "guides": ["Client/Assets/MD~/README.md"],
-      "excludes": ["Packages", "StreamingAssets"]
+      "guides": [
+        "Client/Assets/MD~/README.md"
+      ],
+      "excludes": [
+        "Packages",
+        "StreamingAssets"
+      ]
     }
   ],
-
   "routing": {
     "notifyDocOwners": true,
     "maxNotify": 3,
     "rules": [
       {
         "name": "打包 / CICD",
-        "keywords": ["打包", "cicd", "jenkins", "构建失败"],
-        "paths": ["OnePiece/Tools/Build"],
-        "wiki": ["打包"],
-        "users": [{ "name": "张三", "openId": "ou_replace_me" }],
+        "keywords": [
+          "打包",
+          "cicd",
+          "jenkins",
+          "构建失败"
+        ],
+        "paths": [
+          "OnePiece/Tools/Build"
+        ],
+        "wiki": [
+          "打包"
+        ],
+        "users": [
+          {
+            "name": "张三",
+            "openId": "ou_replace_me"
+          }
+        ],
         "dm": false
       },
       {
         "name": "战斗系统",
-        "keywords": ["战斗", "技能", "battle", "buff"],
-        "paths": ["Client/Assets/Scripts/Battle"],
-        "users": [{ "name": "李四", "email": "lisi@example.com" }],
+        "keywords": [
+          "战斗",
+          "技能",
+          "battle",
+          "buff"
+        ],
+        "paths": [
+          "Client/Assets/Scripts/Battle"
+        ],
+        "users": [
+          {
+            "name": "李四",
+            "email": "lisi@example.com"
+          }
+        ],
         "dm": true
       }
     ]
+  },
+  "docWatch": {
+    "enabled": false,
+    "docs": [
+      {
+        "name": "日方监修反馈信息同步",
+        "wikiToken": "BE3Fwb3q5ieqUAkcxRhcqDTjnxf"
+      },
+      {
+        "name": "每周监修会议题",
+        "wikiToken": "P2UcwFP7YidAeCkq2nEcyhJznuf"
+      }
+    ],
+    "mapping": "doc-watch.mapping.json",
+    "checkMinutes": [
+      0,
+      30
+    ],
+    "staleMinutes": 10,
+    "useModel": true,
+    "clarify": {
+      "enabled": true,
+      "asker": "维护者姓名"
+    },
+    "digest": {
+      "time": "21:00",
+      "to": [
+        "姓名"
+      ]
+    },
+    "wikiBase": "https://rcnc3bm8lc5c.feishu.cn/wiki"
   }
 }

@@ -4,3 +4,4 @@ node_modules/
 .idea/
 data/
 bot.config.json
+doc-watch.mapping.json

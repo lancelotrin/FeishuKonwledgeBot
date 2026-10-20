@@ -7,6 +7,8 @@ import { createLocalGroupContextStore } from './src/local-group-context.mjs';
 import { createProjectReader } from './src/project-knowledge.mjs';
 import { createWikiKnowledgeBase } from './src/wiki-kb.mjs';
 import { createRouter } from './src/routing.mjs';
+import { readFileSync } from 'node:fs';
+import { createDocWatcher } from './src/doc-watch/index.mjs';
 
 async function main() {
   let config;
@@ -26,7 +28,8 @@ async function main() {
 
   // Never print raw SDK errors: they may include HTTP authorization headers.
   const logger = {
-    error: () => console.error('[飞书 SDK] 请求或连接异常，请检查凭证、权限和网络。'),
+    // Failed API calls are already reported with a specific reason by our own code; only surface connection problems.
+    error: (tag) => { if (tag === '[ws]') console.error('[飞书 SDK] 长连接异常，请检查凭证、网络和事件订阅。'); },
     warn: () => console.warn('[飞书 SDK] 连接警告，SDK 将按其策略重试。'),
     info: () => {}, debug: () => {}, trace: () => {},
   };
@@ -36,6 +39,28 @@ async function main() {
   const result = await client.request({ method: 'GET', url: '/open-apis/bot/v3/info' });
   if (result.code !== 0 || !result.bot?.open_id) throw new Error('无法获取机器人信息');
   const botId = result.bot.open_id;
+
+  // Private message to one person; returns Feishu's error code instead of throwing so callers can report it.
+  const sendPrivate = async (openId, content) => {
+    try { return { code: (await client.im.message.create({ params: { receive_id_type: 'open_id' }, data: { receive_id: openId, msg_type: 'post', content } })).code }; }
+    catch (error) { return { code: error?.response?.data?.code ?? -1 }; }
+  };
+
+  let watcher = null;
+  if (config.docWatch) {
+    let mapping;
+    try { mapping = JSON.parse(readFileSync(config.docWatch.mapping, 'utf8')); }
+    catch { console.error(`[文档监测] 读取归因规则失败：${config.docWatch.mapping}`); process.exitCode = 1; return; }
+    watcher = createDocWatcher({ request, send: sendPrivate, ask: messages => askAI(config, messages), mapping,
+      config: config.docWatch, dataDir: join(config.dataDir, 'doc-watch'), report: message => console.error(message) });
+  }
+  if (process.argv.includes('--watch')) {
+    if (!watcher) { console.error('bot.config.json 中未启用 docWatch。'); process.exitCode = 1; return; }
+    const dryRun = process.argv.includes('--dry-run');
+    if (process.argv.includes('--digest')) console.log(await watcher.digest({ dryRun }));
+    else console.log(await watcher.check({ dryRun, force: process.argv.includes('--force') }));
+    return;
+  }
 
   const wiki = createWikiKnowledgeBase({ request, sources: config.wikiSources, cacheDir: join(config.dataDir, 'wiki'),
     maxDocs: config.wikiMaxDocs, report: message => console.error(message) });
@@ -108,10 +133,9 @@ async function main() {
       if (reply.code !== 0) throw new Error('发送失败');
     },
     sendDirect: async (openId, content) => {
-      const sent = await client.im.message.create({ params: { receive_id_type: 'open_id' },
-        data: { receive_id: openId, msg_type: 'post', content } });
-      if (sent.code !== 0) throw new Error('私信失败');
+      if ((await sendPrivate(openId, content)).code !== 0) throw new Error('私信失败');
     },
+    handleDirect: item => watcher ? watcher.handleDirectMessage(item) : Promise.resolve(null),
     report: message => console.error(message),
   });
 
@@ -119,6 +143,10 @@ async function main() {
   ws.start({ eventDispatcher: new lark.EventDispatcher({ logger }).register({
     'im.message.receive_v1': event => { handler.accept(event); },
   }) });
+  if (watcher) {
+    watcher.start();
+    console.log(`[文档监测] 已启动：监测 ${watcher.docs.map(d => d.name).join('、')}，每小时 ${(config.docWatch.checkMinutes || [0, 30]).map(m => `:${String(m).padStart(2, '0')}`).join(' / ')} 检查。`);
+  }
   console.log('飞书凭证验证成功，长连接已启动。私聊或在群内 @机器人 提问；/help 查看指令。');
   console.log('关闭窗口或按 Ctrl+C 停止；请保持电脑联网且不休眠。');
 }

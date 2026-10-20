@@ -118,7 +118,7 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
   loadHistory = async () => [], historyLimit = 20, loadGroupContext = async () => '', saveGroupTurn = async () => {},
   resetGroupContext = async () => {}, searchWiki = () => ({ context: '', docs: [] }), readLinked = async () => '',
   loadProjectContext = async () => ({ context: '', files: [] }), router = null, syncWiki = null, status = () => '',
-  report = () => {} }) {
+  handleDirect = async () => null, report = () => {} }) {
   const seen = new Map();
   const queues = new Map();
   const history = new Map();
@@ -202,6 +202,8 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
       let people = [];
       try {
         body = await command(item);
+        // Private-chat commands of other modules (e.g. doc-watch /bind, 取消推送, clarification numbers).
+        if (body === null && item.chatType === 'p2p') body = await handleDirect(item).catch(() => null);
         if (body === null) {
           if (Array.from(item.text).length > 8000) body = '消息过长，请缩短到 8000 字以内再发送。';
           else ({ body, people } = await answer(item, now));

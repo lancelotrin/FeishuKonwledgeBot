@@ -74,7 +74,38 @@ npm start       # 启动机器人
 
 聊天指令：`/help`、`/sync`（立即同步知识库）、`/status`、`/reset`（清空当前上下文）。
 
-## 4. 数据与安全
+## 4. 文档变更监测（docWatch）
+
+移植自「飞书文档变更通知机器人」（原 Python 版，见交接文档）。随机器人启动，启动时先检查一次，之后每小时 `checkMinutes`（默认 :00 / :30）检查：
+
+1. 读知识库节点的编辑时间，没变就跳过；10 分钟内刚编辑过的先不推（`staleMinutes`，避免推半成品）。
+2. 拉取 docx 全部 block，按 block_id 与本地基线比对，精确到段落的新增 / 修改 / 删除。
+3. 归因：人工确认 > 跨系统主题（`topics`）> DeepSeek 判断 > 关键词与角色规则；模型不可用时自动降级为关键词，并每天给维护者发一次告警。
+4. 按负责人分组私聊发送。**只有全部发送成功才推进基线**，失败的下一轮重试。
+5. 归不上的变更私聊问维护者（`clarify.asker`），回复数字（如 `1,7`）即记住该标题的归属并补发；与已有记录冲突时转给决策人（`arbiter`）。
+6. 每天 `digest.time` 把当天发出的通知汇总给 `digest.to`。
+
+配置在 `bot.config.json` 的 `docWatch`，归因规则文件 `doc-watch.mapping.json` 与原项目的 `mapping.json` 格式相同（可直接拷贝）。
+
+**open_id 必须换绑**：飞书的 open_id 按应用区分，原 mapping.json 里的 open_id 属于旧应用，当前机器人发不出去。请每位负责人（以及决策人、日报接收人）私聊机器人发送：
+
+```
+/bind 自己的姓名
+```
+
+其他私聊指令：`取消推送` / `恢复推送`。另外需要开通 `im:message:send_as_bot`，且应用可用范围覆盖所有接收人（否则报 230013）。
+
+```powershell
+npm run watch                       # 立即检查一次（首次只建基线，不发消息）
+npm run watch -- --dry-run --force  # 只打印将要发送的内容，不发送、不更新基线
+npm run watch -- --digest --dry-run # 预览今天的日报
+```
+
+运行数据在 `data/doc-watch/`：`snapshots/` 基线、`learned.json` 人工确认的归属、`bindings.json` 绑定关系、`notify-log.jsonl` 发送记录、`escalations.jsonl` 升级记录。
+
+⚠️ 新旧两套不要同时运行，否则同一变更会推送两次：启用本模块前请停掉原机器上的 `FeishuDocBot` 计划任务（`schtasks /Delete /TN "FeishuDocBot" /F`）。
+
+## 5. 数据与安全
 
 - 知识库缓存在 `data/wiki/`，群问答记录在 `data/group-context/`，都只在本机；`.env`、`bot.config.json`、`data/` 已被 Git 忽略。
 - 每次提问会把问题、相关知识库片段、代码片段和群消息发给配置的 AI 服务，可能产生费用。

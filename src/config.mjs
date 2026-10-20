@@ -37,6 +37,7 @@ export function readConfig(env, fileConfig = null) {
     dataDir: resolve(env.DATA_DIR || 'data'),
     ackEmoji: env.ACK_EMOJI ?? 'OnIt',
     projects, wikiSources,
+    docWatch: file.docWatch?.enabled ? { ...file.docWatch, mapping: resolve(file.docWatch.mapping || 'doc-watch.mapping.json') } : null,
     routing: { rules: file.routing?.rules || [], notifyDocOwners: file.routing?.notifyDocOwners ?? true,
       maxNotify: file.routing?.maxNotify ?? 3 },
   };

@@ -8,6 +8,7 @@
     "start": "node --env-file=.env bot.mjs",
     "check": "node --env-file=.env bot.mjs --check",
     "sync": "node --env-file=.env bot.mjs --sync",
+    "watch": "node --env-file=.env bot.mjs --watch",
     "test": "node --test"
   },
   "dependencies": { "@larksuiteoapi/node-sdk": "1.74.0" }
