@@ -127,7 +127,7 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
   resetGroupContext = async () => {}, searchWiki = () => ({ context: '', docs: [] }), readLinked = async () => '',
   loadProjectContext = async () => ({ context: '', files: [] }), router = null, syncWiki = null, status = () => '',
   handleDirect = async () => null, recordOpenIds = async () => {}, loadQuoted = async () => '',
-  loadMemory = async () => '', saveMemory = async () => {}, report = () => {} }) {
+  loadMemory = async () => '', saveMemory = async () => {}, loadUpdates = async () => '', report = () => {} }) {
   const seen = new Map();
   const queues = new Map();
   const history = new Map();
@@ -170,13 +170,14 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
     const recent = previous.slice(-3).map(x => x.content).join('\n');
     const base = Array.from(item.text).length < 20 || FOLLOWUP.test(item.text) ? `${item.text}\n${recent}` : item.text;
     const query = quoted ? `${item.text}\n${quoted.slice(0, 1500)}` : base;
-    const [docContext, wiki, linked, project, memory] = await Promise.all([
+    const [docContext, wiki, linked, project, memory, updates] = await Promise.all([
       item.chatType === 'group' ? loadGroupContext(item).catch(() => { report('读取本地群问答失败。'); return ''; }) : '',
       Promise.resolve().then(() => searchWiki(query)).catch(() => { report('知识库检索失败。'); return { context: '', docs: [] }; }),
       // Doc links in the question or in the replied-to message (doc-watch notifications end with one).
       readLinked(`${item.text}\n${quoted}`, query).catch(() => ''),
       loadProjectContext(query).catch(() => { report('项目资料检索失败。'); return { context: '', files: [] }; }),
       loadMemory(item, query).catch(() => { report('读取私聊问答记录失败。'); return ''; }),
+      loadUpdates(item, query).catch(() => { report('读取文档变更记录失败。'); return ''; }),
     ]);
     let candidates = [];
     if (router) {
@@ -184,6 +185,7 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
       catch { report('计算相关人失败；本次不通知。'); }
     }
     const context = [{ role: 'system', content: system }, { role: 'system', content: ANSWER_RULES }];
+    if (updates) context.push({ role: 'system', content: `被监测文档最近的变更记录（文档监测自动逐段比对得出，按时间从新到旧；问“改了什么 / 最新内容”时以此为准回答，说明变更时间、所在标题和内容）：\n${updates}` });
     if (quoted) context.push({ role: 'system', content: `用户是在回复下面这条消息，问题针对它的内容：\n${quoted.slice(0, 4000)}` });
     if (linked) context.push({ role: 'system', content: `用户消息或被回复消息中引用的飞书文档（与问题最相关的段落）：\n${linked}` });
     if (wiki.context) context.push({ role: 'system', content: `团队飞书知识库中与问题相关的文档片段：\n${wiki.context}` });

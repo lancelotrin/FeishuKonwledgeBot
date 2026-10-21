@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { flattenBlocks, diffDocs } from '../src/doc-watch/blocks.mjs';
 import { summarize } from '../src/doc-watch/summary.mjs';
 import { attribute, routeOptions } from '../src/doc-watch/attribution.mjs';
-import { createDocWatcher, parseDocSource } from '../src/doc-watch/index.mjs';
+import { createDocWatcher, parseDocSource, asksAboutChanges } from '../src/doc-watch/index.mjs';
 
 const text = (id, content, type = 2, children = []) => ({ block_id: id, block_type: type,
   [type === 2 ? 'text' : `heading${type - 2}`]: { elements: [{ text_run: { content } }] }, children });
@@ -93,9 +93,55 @@ test('watcher: baseline first, notifies owners, debounces, and keeps the baselin
   state.failFor.clear();
   report = await watcher.check(); // retried because the baseline did not advance
   assert.match(report, /张琪：OK/);
+  assert.match(report, /殷琦：SKIP：这批变更已发过/); // already delivered: not sent twice
   assert.match(await watcher.check(), /无变更/);
   const log = (await readFile(join(dir, 'notify-log.jsonl'), 'utf8')).trim().split('\n');
-  assert.equal(log.length, 3);
+  assert.equal(log.length, 2);
+  assert.equal(state.sent.filter(s => s.openId === 'ou_yin').length, 1);
+  const changes = await watcher.recentChanges();
+  assert.match(changes, /【监修反馈】.*检测到的变更 https:\/\/rcnc3bm8lc5c\.feishu\.cn\/wiki\/BE3Fwb3q5ieqUAkcxRhcqDTjnxf\n▸ 10月20日\n  ＋ 技能icon重做/);
+});
+
+test('watcher: a recipient who keeps failing stops blocking the baseline after 6 rounds', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'watch-'));
+  const { state, request, send } = fakeFeishu();
+  const reports = [];
+  const watcher = createDocWatcher({ request, send, mapping, dataDir: dir, log: () => {}, report: m => reports.push(m),
+    config: { docs: ['https://x.feishu.cn/wiki/BE3Fwb3q5ieqUAkcxRhcqDTjnxf'], staleMinutes: 0, clarify: { enabled: false } } });
+  await watcher.check();
+  await watcher.handleDirectMessage({ userId: 'ou_yin', text: '/bind 殷琦' });
+  await watcher.handleDirectMessage({ userId: 'ou_zq', text: '/bind 张琪' });
+  state.failFor.add('ou_zq');
+  state.edit++;
+  state.blocks = [page(['h', 'a', 'c']), text('h', '10月20日', 3), text('a', '路飞技能A'), text('c', '技能icon重做')];
+  for (let round = 1; round < 6; round++) assert.match(await watcher.check(), /下轮只重发给失败的人/);
+  assert.match(await watcher.recentChanges(), /【监修反馈】[\s\S]*＋ 技能icon重做/); // pending batches are already answerable
+  assert.match(await watcher.check(), /已放弃重试并推进基线/);
+  assert.match(await watcher.check(), /无变更/);
+  assert.equal(state.sent.filter(s => s.openId === 'ou_yin').length, 1); // never repeated
+  assert.match(reports.join('\n'), /张琪 ERR 230013/);
+});
+
+test('watcher: an open_id from another app (99992361) is reported but does not hold back the baseline', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'watch-'));
+  const { state, request, send: base } = fakeFeishu();
+  const send = async (openId, content) => openId === 'ou_other_app' ? { code: 99992361 } : base(openId, content);
+  const watcher = createDocWatcher({ request, send, mapping, dataDir: dir, log: () => {},
+    config: { docs: ['https://x.feishu.cn/wiki/BE3Fwb3q5ieqUAkcxRhcqDTjnxf'], staleMinutes: 0, clarify: { enabled: false } } });
+  await watcher.check();
+  state.edit++;
+  state.blocks = [page(['h', 'a', 'c']), text('h', '10月20日', 3), text('a', '路飞技能A'), text('c', '技能icon重做')];
+  const report = await watcher.check(); // 殷琦 is unbound: the mapping's open_id belongs to another app
+  assert.match(report, /殷琦：SKIP：殷琦 的 open_id 属于其他应用/);
+  assert.doesNotMatch(report, /基线不推进/);
+  assert.match(await watcher.check(), /无变更/);
+});
+
+test('change questions: only "what changed" questions about watched documents use the change log', () => {
+  assert.equal(asksAboutChanges('监修文档刚改了什么内容最新的', '监修文档刚改了什么内容最新的'), true);
+  assert.equal(asksAboutChanges('最近有什么更新', '最近有什么更新\n📌 每周监修会议题', ['每周监修会议题']), true);
+  assert.equal(asksAboutChanges('监修视频怎么录', '监修视频怎么录'), false);
+  assert.equal(asksAboutChanges('背景图改了什么', '背景图改了什么'), false);
 });
 
 test('watcher: each section is condensed into short Chinese lines; model failure falls back to the paragraph list', async () => {

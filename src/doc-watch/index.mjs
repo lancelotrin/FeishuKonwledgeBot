@@ -1,7 +1,11 @@
 // Document change monitor: on a schedule, diffs watched docx documents block by block, works out
 // which module owners each change belongs to, and messages them privately.
 // Invariant: the baseline snapshot only advances after every real send succeeded, so failed
-// notifications are retried next round instead of being lost.
+// notifications are retried next round instead of being lost. Recipients who already received a batch
+// are remembered (deliveries.json) and never get the same batch twice; after MAX_ATTEMPTS failed rounds
+// the baseline advances anyway so one unreachable person cannot block everyone else.
+// Every delivered batch is appended to changes-log.jsonl, which answers "what changed recently".
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { flattenBlocks, diffDocs, countChanges } from './blocks.mjs';
@@ -12,8 +16,17 @@ import { createPostContent } from '../core.mjs';
 const CANCEL = /^(取消推送|退订|别发了|不要发了|不想收|停止推送|关闭推送|取消)[。！!\s]*$/;
 const RESUME = /^(恢复推送|继续推送|重新订阅|订阅)[。！!\s]*$/;
 const sleep = ms => new Promise(done => setTimeout(done, ms));
+const MAX_ATTEMPTS = 6;
+const KIND_MARK = { added: '＋', changed: '～', removed: '－' };
 const today = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 const stamp = (now = new Date()) => `${today(now)} ${now.toTimeString().slice(0, 8)}`;
+
+// A question about recent edits ("改了什么 / 最新 / 更新") that concerns the watched documents
+// (mentions 监修 or a watched document's name, in the question or the message it replies to).
+export function asksAboutChanges(text, context, docNames = []) {
+  if (!/改了|改动|修改|更新|变更|变化|最新|新增|刚刚|最近|删了|动了/.test(text)) return false;
+  return /监修/.test(context) || docNames.some(name => name && context.includes(name));
+}
 
 export function parseDocSource(entry) {
   const value = typeof entry === 'string' ? { url: entry } : { ...entry };
@@ -77,8 +90,10 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     if (!person?.openId) return `SKIP：${name} 没有 open_id（请让对方私聊机器人发送 /bind ${name}）`;
     const result = await send(person.openId, createPostContent(markdown));
     if (result.code === 0) return 'OK';
-    const hint = result.code === 99992361 ? '（open_id 属于其他应用，请让对方私聊机器人发送 /bind 姓名）'
-      : result.code === 230013 ? '（对方不在应用可用范围内）' : '';
+    // An open_id issued to another app never starts working by retrying: like a missing open_id it is a
+    // configuration gap (the person must /bind), so it is reported but does not hold back the baseline.
+    if (result.code === 99992361) return `SKIP：${name} 的 open_id 属于其他应用（请让对方私聊机器人发送 /bind ${name}）`;
+    const hint = result.code === 230013 ? '（对方不在应用可用范围内）' : '';
     return `ERR ${result.code}${hint}`;
   }
 
@@ -116,7 +131,7 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     ].filter((line, n, all) => line || (n > 0 && all[n - 1])).join('\n');
   }
 
-  async function dispatch(doc, changes, { dryRun, degraded, sentence, condensed }) {
+  async function dispatch(doc, changes, { dryRun, degraded, sentence, condensed, delivered = new Set() }) {
     const learned = await load('learned.json', {});
     const directory = await people();
     const unsubscribed = await load('unsubscribed.json', {});
@@ -135,6 +150,7 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     }
     const results = {};
     for (const [name, subset] of buckets) {
+      if (delivered.has(name)) { results[name] = 'SKIP：这批变更已发过'; continue; }
       if (unsubscribed[name]) { results[name] = 'SKIP：已取消推送'; continue; }
       const markdown = messageFor(doc, name, directory[name]?.role, subset,
         { degraded, sentence, condensed, subtitle: subset.lead ? '未匹配到具体模块，已同步组长' : '' });
@@ -278,16 +294,37 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
         }
         // Condensing (and translating) is best-effort: if the model fails, the paragraph list is sent as before.
         const condensed = ask && config.condense !== false ? await condenseWithModel(changes, ask).catch(() => ({})) : {};
-        const { results, unmatched } = await dispatch(doc, changes, { dryRun, degraded, sentence, condensed });
+        // Same batch as a previous failed round: skip the people who already received it.
+        const signature = createHash('sha1').update(JSON.stringify(['added', 'changed', 'removed']
+          .map(kind => changes[kind].map(item => `${item.id}:${item.text}`)))).digest('hex');
+        const deliveries = await load('deliveries.json', {});
+        const state = deliveries[source.token]?.signature === signature
+          ? deliveries[source.token] : { signature, sent: [], attempts: 0 };
+        const { results, unmatched } = await dispatch(doc, changes,
+          { dryRun, degraded, sentence, condensed, delivered: new Set(state.sent) });
         const failed = Object.values(results).some(r => r.startsWith('ERR'));
-        // SKIP (no open_id / unsubscribed) is a configuration gap and must not block the baseline;
-        // real send failures keep the old baseline so the same changes are retried next round.
-        if (!dryRun && !failed) {
-          await save(snapshotName(source.token), doc);
-          await askUnmatched(doc, unmatched);
+        let gaveUp = false;
+        if (!dryRun) {
+          state.sent = [...new Set([...state.sent, ...Object.keys(results).filter(name => results[name] === 'OK')])];
+          state.attempts++;
+          gaveUp = failed && state.attempts >= MAX_ATTEMPTS;
+          const record = { time: state.pending?.time || stamp(), doc: doc.title, token: doc.token, condensed,
+            items: ['added', 'changed', 'removed'].flatMap(kind => changes[kind]
+              .filter(item => !item.level).slice(0, 80).map(item => ({ kind, section: item.section || '', text: item.text.slice(0, 300) }))) };
+          // SKIP (no open_id / unsubscribed) is a configuration gap and must not block the baseline;
+          // real send failures keep the old baseline (up to MAX_ATTEMPTS rounds) so they are retried.
+          if (!failed || gaveUp) {
+            await save(snapshotName(source.token), doc);
+            delete deliveries[source.token];
+            await appendFile(join(root, 'changes-log.jsonl'), JSON.stringify(record) + '\n', 'utf8');
+            await askUnmatched(doc, unmatched);
+            if (gaveUp) report(`[文档监测] 《${doc.title}》连续 ${MAX_ATTEMPTS} 轮有人发送失败，已放弃重试：${Object.entries(results).filter(([, r]) => r.startsWith('ERR')).map(([n, r]) => `${n} ${r}`).join('；')}`);
+          } else deliveries[source.token] = { ...state, pending: record }; // still visible to "what changed" questions
+          await save('deliveries.json', deliveries);
         }
         const lines = Object.entries(results).map(([name, r]) => `  → ${name}：${dryRun ? r.replace(/^DRY-RUN\n/, '\n') : r}`);
-        summary.push(`${doc.title}：${total} 处变更${degraded ? '（模型不可用，按关键词分发）' : ''}${failed ? '，有发送失败，基线不推进，下轮重试' : ''}\n${lines.join('\n')}`);
+        const note = !failed ? '' : gaveUp ? `，连续 ${MAX_ATTEMPTS} 轮有人发送失败，已放弃重试并推进基线` : '，有发送失败，基线不推进，下轮只重发给失败的人';
+        summary.push(`${doc.title}：${total} 处变更${degraded ? '（模型不可用，按关键词分发）' : ''}${note}\n${lines.join('\n')}`);
       } catch (error) {
         summary.push(`${source.name}：检查失败 ${error.message}`);
       }
@@ -313,8 +350,37 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     return text;
   }
 
+  // Recent delivered change batches, newest first, as prompt text for "what changed" questions.
+  async function recentChanges({ days = 7, maxChars = 6000 } = {}) {
+    let rows = [];
+    try { rows = (await readFile(join(root, 'changes-log.jsonl'), 'utf8')).split('\n').filter(Boolean).map(x => JSON.parse(x)); }
+    catch { /* no delivered batch yet */ }
+    // Batches detected but still being retried for some recipients are real changes too.
+    rows.push(...Object.values(await load('deliveries.json', {})).map(state => state.pending).filter(Boolean));
+    rows.sort((a, b) => a.time.localeCompare(b.time));
+    const since = stamp(new Date(Date.now() - days * 86400_000));
+    const parts = [];
+    let used = 0;
+    for (const row of rows.filter(r => r.time >= since).reverse()) {
+      const sections = new Map();
+      for (const item of row.items || []) {
+        if (!sections.has(item.section)) sections.set(item.section, []);
+        sections.get(item.section).push(`${KIND_MARK[item.kind] || ''} ${item.text}`);
+      }
+      const body = [...sections].map(([section, lines]) => {
+        const points = row.condensed?.[section || '（无标题）'];
+        return `▸ ${section || '（无标题）'}\n${(points?.length ? [].concat(points) : lines.slice(0, 6)).map(x => `  ${x}`).join('\n')}`;
+      }).join('\n');
+      const part = `【${row.doc}】${row.time} 检测到的变更 ${wikiBase}/${row.token}\n${body}`;
+      if (used + part.length > maxChars) break;
+      parts.push(part); used += part.length;
+    }
+    return parts.join('\n\n');
+  }
+
   const api = {
     docs,
+    recentChanges,
     // Single-flight: a slow round never overlaps the next scheduled one.
     check(options = {}) {
       running ||= checkNow(options).finally(() => { running = null; });

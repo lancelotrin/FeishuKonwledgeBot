@@ -10,7 +10,7 @@ import { createPrivateMemory } from './src/private-memory.mjs';
 import { createRouter } from './src/routing.mjs';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { createDocWatcher } from './src/doc-watch/index.mjs';
+import { createDocWatcher, asksAboutChanges } from './src/doc-watch/index.mjs';
 
 async function main() {
   let config;
@@ -124,6 +124,9 @@ async function main() {
     resetGroupContext: item => groupDocuments.reset(item.chatId),
     searchWiki: query => wiki.search(query, 6, { boost: focusBoost(config.wikiFocus, query) }),
     readLinked: (text, query) => wiki.readLinked(text, query),
+    // "监修文档刚改了什么" → the doc-watch change log.
+    loadUpdates: async (item, query) => watcher && asksAboutChanges(item.text, query, watcher.docs.map(d => d.name))
+      ? watcher.recentChanges() : '',
     loadMemory: (item, query) => privateMemory ? privateMemory.read(item, query) : Promise.resolve(''),
     saveMemory: (item, answer) => privateMemory ? privateMemory.save(item, answer) : Promise.resolve(),
     // The message the user replied to (e.g. a doc-watch notification), as plain text.
