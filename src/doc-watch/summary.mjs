@@ -20,7 +20,8 @@ export function headline(changes) {
 }
 
 // Groups changes by heading path, merges duplicates and folds long lists.
-export function summarize(changes) {
+// `condensed` ({ section: [short lines] }) replaces a section's paragraph list with those lines.
+export function summarize(changes, condensed = {}) {
   const groups = new Map();
   let noise = 0;
   const add = (mark, item) => {
@@ -41,6 +42,11 @@ export function summarize(changes) {
     if (n >= MAX_SECTIONS) return;
     const items = groups.get(section);
     lines.push(`▸ ${Array.from(section).length > 40 ? Array.from(section).slice(-40).join('') : section}`);
+    if (condensed[section]?.length) {
+      const marks = [...new Set(items.map(line => line[0]))].join('');
+      for (const point of [].concat(condensed[section])) lines.push(`   ${marks} ${point}`);
+      return;
+    }
     for (const line of items.slice(0, MAX_PER_SECTION)) lines.push(`   ${line}`);
     if (items.length > MAX_PER_SECTION) lines.push(`   …本节共 ${items.length} 处`);
   });

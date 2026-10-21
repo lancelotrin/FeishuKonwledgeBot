@@ -32,7 +32,7 @@ export function chunkText(text, size = 900, overlap = 150) {
   for (const paragraph of paragraphs) {
     if (current && current.length + paragraph.length + 1 > size) {
       chunks.push(current);
-      current = current.slice(-overlap);
+      current = overlap ? current.slice(-overlap) : ''; // slice(-0) would keep everything
     }
     if (paragraph.length > size) {
       for (let i = 0; i < paragraph.length; i += size - overlap) {

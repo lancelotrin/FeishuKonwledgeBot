@@ -69,6 +69,9 @@
   },
   "docWatch": {
     "enabled": false,
+    "admins": [
+      "管理员姓名"
+    ],
     "docs": [
       {
         "name": "日方监修反馈信息同步",

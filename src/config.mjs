@@ -23,8 +23,23 @@ export function readConfig(env, fileConfig = null) {
     if (!p?.root) throw new Error(`bot.config.json 的 projects[${n}] 缺少 root`);
     return { name: p.name || `项目${n + 1}`, root: p.root, guides: p.guides || [], extensions: p.extensions, excludes: p.excludes || [] };
   });
-  const wikiSources = (file.wiki || []).map(parseWikiSource);
+  // Documents watched by docWatch (e.g. the 监修 documents) are also searchable, as single-document,
+  // priority sources listed first so their priority flag wins over a subtree containing them.
+  const watchOrigin = (file.docWatch?.wikiBase || 'https://rcnc3bm8lc5c.feishu.cn/wiki').match(/^https?:\/\/[^/]+/)?.[0] || '';
+  const watched = file.docWatch?.enabled ? (file.docWatch.docs || []).map(entry => {
+    const value = typeof entry === 'string' ? { url: entry } : entry;
+    const token = value.wikiToken || value.wiki_token || (value.url || '').match(/\/wiki\/([A-Za-z0-9]+)/)?.[1];
+    return token && { name: value.name || token, token, kind: 'wiki', origin: watchOrigin, scope: 'node', priority: true };
+  }).filter(Boolean) : [];
+  const wikiSources = [...watched, ...(file.wiki || []).map(parseWikiSource)];
+  // When the question or the message it replies to mentions a `when` word, documents whose title or
+  // path contains a `prefer` word (and the watched documents) are ranked first.
+  const wikiFocus = (file.wikiFocus || [{ when: ['监修', '监修会', '日方', '版权方'], prefer: ['监修'] }])
+    .map(rule => ({ when: rule.when || [], prefer: rule.prefer || [], boost: rule.boost || 3 }));
+  // Private Q&A memory. scope "all": records help anyone's later questions; "user": only the same person's.
+  const privateMemory = { enabled: file.privateMemory?.enabled ?? true, scope: file.privateMemory?.scope === 'user' ? 'user' : 'all' };
   return {
+    wikiFocus, privateMemory,
     appId: env.FEISHU_APP_ID.trim(), appSecret: env.FEISHU_APP_SECRET.trim(),
     endpoint: base.href.replace(/\/$/, '') + '/chat/completions',
     apiKey: env.AI_API_KEY.trim(), model: (env.AI_MODEL || 'deepseek-chat').trim(),

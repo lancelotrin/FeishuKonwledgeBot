@@ -6,7 +6,7 @@ import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises
 import { join, resolve } from 'node:path';
 import { flattenBlocks, diffDocs, countChanges } from './blocks.mjs';
 import { headline, summarize } from './summary.mjs';
-import { attribute, ownersFor, routeOptions, annotateWithModel, summarizeWithModel } from './attribution.mjs';
+import { attribute, ownersFor, routeOptions, annotateWithModel, summarizeWithModel, condenseWithModel } from './attribution.mjs';
 import { createPostContent } from '../core.mjs';
 
 const CANCEL = /^(取消推送|退订|别发了|不要发了|不想收|停止推送|关闭推送|取消)[。！!\s]*$/;
@@ -28,6 +28,8 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
   const wikiBase = (config.wikiBase || 'https://rcnc3bm8lc5c.feishu.cn/wiki').replace(/\/$/, '');
   const staleMs = (config.staleMinutes ?? 10) * 60_000;
   const asker = config.clarify?.asker || '';
+  // Admins may bind other people by @mentioning them; default to the clarification maintainer.
+  const admins = config.admins || [asker].filter(Boolean);
   const clarifyEnabled = config.clarify?.enabled ?? true;
   const options = routeOptions(mapping);
   let running = null;
@@ -97,7 +99,9 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
 
   // ---------------------------------------------------------------- dispatch
   function messageFor(doc, name, role, subset, extra) {
-    const body = summarize(subset).split('\n').map(line => line.startsWith('▸') ? `**${line}**`
+    const condensed = extra.condensed || {};
+    const refined = ['added', 'changed', 'removed'].some(kind => subset[kind].some(item => condensed[item.section || '（无标题）']));
+    const body = summarize(subset, condensed).split('\n').map(line => line.startsWith('▸') ? `**${line}**`
       : line.startsWith('   ') ? `- ${line.trim()}` : line).join('\n');
     return [
       `**📌 ${doc.title}**`,
@@ -106,12 +110,13 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
       extra.sentence || '',
       '',
       body,
+      refined ? '（以上由 AI 精炼，日文已译为中文，原文见文档）' : '',
       '',
       `🔗 ${wikiBase}/${doc.token}`,
     ].filter((line, n, all) => line || (n > 0 && all[n - 1])).join('\n');
   }
 
-  async function dispatch(doc, changes, { dryRun, degraded, sentence }) {
+  async function dispatch(doc, changes, { dryRun, degraded, sentence, condensed }) {
     const learned = await load('learned.json', {});
     const directory = await people();
     const unsubscribed = await load('unsubscribed.json', {});
@@ -132,7 +137,7 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     for (const [name, subset] of buckets) {
       if (unsubscribed[name]) { results[name] = 'SKIP：已取消推送'; continue; }
       const markdown = messageFor(doc, name, directory[name]?.role, subset,
-        { degraded, sentence, subtitle: subset.lead ? '未匹配到具体模块，已同步组长' : '' });
+        { degraded, sentence, condensed, subtitle: subset.lead ? '未匹配到具体模块，已同步组长' : '' });
       if (dryRun) { results[name] = `DRY-RUN\n${markdown}`; continue; }
       results[name] = await sendTo(name, markdown);
       if (results[name] === 'OK') {
@@ -198,6 +203,36 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     return `✅ 记住了：「${section || '（无标题）'}」→ ${label(keys)}\n以后这个标题下的变更会自动归到这些模块。${forwarded.length ? `\n已补发给：${forwarded.join('、')}` : ''}`;
   }
 
+  // Admin batch binding: "/bind @殷琦 @万汩" or "/bind 宋子由 @宋自由" (name from the config, then the person).
+  async function bindMentioned(item, text, known) {
+    const sender = await nameOf(item.userId);
+    if (!admins.includes(sender)) {
+      return `只有管理员（${admins.join('、') || '未配置'}）可以替别人绑定。管理员需先私聊机器人发送 /bind 自己的姓名。`;
+    }
+    const bindings = await load('bindings.json', {});
+    const done = [];
+    const failed = [];
+    const tokens = text.replace(/^\/bind/, '').trim().split(/\s+/);
+    tokens.forEach((token, n) => {
+      if (!token.startsWith('@')) return;
+      const person = item.mentions.find(m => `@${m.name}` === token);
+      if (!person) { failed.push(`${token}（没识别到这个 @）`); return; }
+      const alias = n > 0 && !tokens[n - 1].startsWith('@') ? tokens[n - 1] : '';
+      // Display names often decorate the real name, e.g. 「阿飞（苏敬袁）」「王宏钢（Coke）」: fall back to the
+      // longest roster name contained in the display name.
+      const contained = [...known].filter(k => person.name.includes(k)).sort((a, b) => b.length - a.length)[0];
+      const name = alias || (known.has(person.name) ? person.name : contained || person.name);
+      if (!known.has(name)) { failed.push(`${name}（不在人员名单里，可写成「名单里的姓名 @此人」）`); return; }
+      bindings[name] = person.openId;
+      done.push(alias && alias !== person.name ? `${name} → ${person.name}` : name);
+    });
+    if (done.length) await save('bindings.json', bindings);
+    const missing = [...known].filter(name => !bindings[name]);
+    return [done.length ? `✅ 已绑定 ${done.length} 人：${done.join('、')}` : '没有绑定任何人。',
+      failed.length ? `⚠️ 未绑定：${failed.join('；')}` : '',
+      missing.length ? `还没绑定：${missing.join('、')}` : '名单里的人已全部绑定。'].filter(Boolean).join('\n');
+  }
+
   async function alertDegraded(reason, dryRun) {
     const health = await load('health.json', {});
     if (dryRun || health.lastNotice === today() || !asker) return;
@@ -241,7 +276,9 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
             await alertDegraded(error.message, dryRun);
           }
         }
-        const { results, unmatched } = await dispatch(doc, changes, { dryRun, degraded, sentence });
+        // Condensing (and translating) is best-effort: if the model fails, the paragraph list is sent as before.
+        const condensed = ask && config.condense !== false ? await condenseWithModel(changes, ask).catch(() => ({})) : {};
+        const { results, unmatched } = await dispatch(doc, changes, { dryRun, degraded, sentence, condensed });
         const failed = Object.values(results).some(r => r.startsWith('ERR'));
         // SKIP (no open_id / unsubscribed) is a configuration gap and must not block the baseline;
         // real send failures keep the old baseline so the same changes are retried next round.
@@ -288,11 +325,12 @@ export function createDocWatcher({ request: rawRequest, send, ask = null, mappin
     // Private-chat commands for this module. Returns a reply, or null to let the Q&A bot answer.
     async handleDirectMessage(item) {
       const text = item.text.trim();
+      const known = new Set([...Object.keys(mapping.owners || {}), ...(mapping.routes || []).flatMap(r => [r.owner, ...(r.cc || [])]),
+        ...(mapping.leads || []), mapping.arbiter, asker, ...(config.digest?.to || []), ...admins].filter(Boolean));
+      if (text.startsWith('/bind') && item.mentions?.length) return bindMentioned(item, text, known);
       const bind = text.match(/^\/bind\s+(\S+)$/);
       if (bind) {
         const name = bind[1];
-        const known = new Set([...Object.keys(mapping.owners || {}), ...(mapping.routes || []).flatMap(r => [r.owner, ...(r.cc || [])]),
-          ...(mapping.leads || []), mapping.arbiter, asker, ...(config.digest?.to || [])]);
         if (!known.has(name)) return `「${name}」不在文档通知的人员名单里，请检查姓名。`;
         const bindings = await load('bindings.json', {});
         if (bindings[name] && bindings[name] !== item.userId) return `「${name}」已绑定其他账号；如需更换请联系维护者${asker ? ` ${asker}` : ''}。`;

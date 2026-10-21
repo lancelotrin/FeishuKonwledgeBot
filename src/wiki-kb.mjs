@@ -32,6 +32,20 @@ function ensureOk(body, what) {
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
+// Picks the chunks of a long text that best match the query, in their original order.
+export function excerpt(text, query, maxChars = 8000) {
+  if (Array.from(text).length <= maxChars) return text;
+  const chunks = chunkText(text, 700, 0).map((part, n) => ({ n, text: part }));
+  const ranked = createBm25Index(chunks).search(query, chunks.length);
+  const picked = [];
+  let used = 0;
+  for (const hit of ranked.length ? ranked : chunks) {
+    if (used + hit.text.length > maxChars) continue;
+    picked.push(hit); used += hit.text.length;
+  }
+  return picked.sort((a, b) => a.n - b.n).map(x => x.text).join('\n…\n');
+}
+
 export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir = 'data/wiki', maxDocs = 3000,
   report = console.error, contextChars = 9000, minInterval = 250 }) {
   const root = resolve(cacheDir);
@@ -142,19 +156,22 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
         }
         const start = await getNode(source.token);
         const origin = source.origin || '';
+        const priority = Boolean(source.priority);
         const visit = async (spaceId, parentToken, path) => {
           for (const child of await listChildren(spaceId, parentToken)) {
             if (queue.length >= maxDocs) { complete = false; return; }
             const childPath = [...path, child.title || '无标题'];
-            queue.push({ node: child, path: childPath, url: `${origin}/wiki/${child.node_token}` });
+            queue.push({ node: child, path: childPath, url: `${origin}/wiki/${child.node_token}`, priority });
             if (child.has_child) await visit(spaceId, child.node_token, childPath);
           }
         };
         const visitSubtree = async () => {
-          queue.push({ node: start, path: [start.title], url: `${origin}/wiki/${start.node_token}` });
+          queue.push({ node: start, path: [start.title], url: `${origin}/wiki/${start.node_token}`, priority });
           if (start.has_child) await visit(start.space_id, start.node_token, [start.title]);
         };
-        if (source.scope === 'subtree') await visitSubtree();
+        // "node": just this one document (used for the doc-watch documents).
+        if (source.scope === 'node') queue.push({ node: start, path: [start.title], url: `${origin}/wiki/${start.node_token}`, priority });
+        else if (source.scope === 'subtree') await visitSubtree();
         else {
           try { await visit(start.space_id, '', [source.name].filter(Boolean)); }
           catch (error) {
@@ -175,7 +192,7 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
         report(`[知识库] 同步「${source.name || source.token}」失败：${error.message}。${hint}`);
       }
     }
-    await pool(queue, 4, async ({ node, path, url }) => {
+    await pool(queue, 4, async ({ node, path, url, priority = false }) => {
       // Shortcuts point at another node; index the original document once.
       const objToken = node.obj_token;
       if (!objToken || seen.has(objToken)) return;
@@ -186,8 +203,8 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
       // Unchanged version: read from the local cache, no download.
       const reusable = cachedCopy(objToken, editTime);
       if (reusable) {
-        if (reusable.path.join('/') !== path.join('/') || reusable.url !== url || reusable.title !== node.title) {
-          await saveDoc({ ...reusable, path, url, title: node.title || reusable.title });
+        if (reusable.path.join('/') !== path.join('/') || reusable.url !== url || reusable.title !== node.title || Boolean(reusable.priority) !== priority) {
+          await saveDoc({ ...reusable, path, url, priority, title: node.title || reusable.title });
         }
         return;
       }
@@ -197,11 +214,11 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
         report(`[知识库] 读取《${node.title}》失败：${error.message}${cached ? '，继续使用本地旧版本' : '，下次同步会重试'}`);
         if (cached) return; // keep the stale copy rather than losing the document
         // Keep the title searchable but leave the version empty so the next sync retries the download.
-        docs.set(objToken, { objToken, objType: node.obj_type, title: node.title || '无标题', path, url,
+        docs.set(objToken, { objToken, objType: node.obj_type, title: node.title || '无标题', path, url, priority,
           owner: node.owner || node.creator || '', editTime: '', text: '' });
         return;
       }
-      await saveDoc({ objToken, objType: node.obj_type, title: node.title || '无标题', path, url,
+      await saveDoc({ objToken, objType: node.obj_type, title: node.title || '无标题', path, url, priority,
         owner: node.owner || node.creator || '', editTime, text });
     });
     // Only drop deleted documents after a full, error-free walk; a partial sync must not erase the cache.
@@ -226,14 +243,15 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
     get status() { return { documents: docs.size, lastSync }; },
 
     // Returns prompt context plus the hit documents (used to route the answer to owners).
-    search(query, limit = 6) {
-      const hits = index.search(query, 24);
+    // `boost(doc)` multiplies a document's score, e.g. to put 监修 documents first in 监修 conversations.
+    search(query, limit = 6, { boost = () => 1 } = {}) {
+      const hits = index.search(query, 60);
       const byDoc = new Map();
       for (const hit of hits) {
         const doc = docs.get(hit.token);
         if (!doc) continue;
         const entry = byDoc.get(doc.objToken) || { doc, score: 0, chunks: [] };
-        entry.score += hit.score;
+        entry.score += hit.score * boost(doc);
         if (entry.chunks.length < 2) entry.chunks.push(hit.text.split('\n').slice(2).join('\n'));
         byDoc.set(doc.objToken, entry);
       }
@@ -251,7 +269,8 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
     },
 
     // Reads Feishu doc links pasted into the chat directly, even if they are outside the configured spaces.
-    async readLinked(text, maxChars = 8000) {
+    // Long documents are cut down to the passages most relevant to `query`, kept in document order.
+    async readLinked(text, query = text, maxChars = 8000) {
       const parts = [];
       for (const link of parseDocLinks(text).slice(0, 3)) {
         try {
@@ -267,13 +286,25 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
             editTime = await docxVersion(objToken).catch(() => '');
           }
           const body = cachedCopy(objToken, editTime)?.text ?? await fetchText(objType, objToken);
-          parts.push(`《${title}》 ${link.url}\n${Array.from(body).slice(0, maxChars).join('')}`);
+          parts.push(`《${title}》 ${link.url}\n${excerpt(body, query, maxChars)}`);
         } catch {
           parts.push(`《${link.url}》无法读取：请确认机器人应用有该文档的阅读权限。`);
         }
       }
       return parts.join('\n\n---\n\n');
     },
+  };
+}
+
+// Ranking for a conversation: when `text` contains a focus rule's `when` word, documents whose
+// title/path contain one of its `prefer` words, or priority (watched) documents, score `boost`× higher.
+// Priority documents always get a small lift.
+export function focusBoost(rules, text) {
+  const active = (rules || []).filter(rule => rule.when.some(word => text.includes(word)));
+  return doc => {
+    const where = `${doc.path.join('/')}/${doc.title}`;
+    const focused = active.find(rule => doc.priority || rule.prefer.some(word => where.includes(word)));
+    return focused ? focused.boost : doc.priority ? 1.5 : 1;
   };
 }
 

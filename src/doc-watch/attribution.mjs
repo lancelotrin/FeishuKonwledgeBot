@@ -95,6 +95,40 @@ export async function annotateWithModel(changes, mapping, ask, maxItems = 40) {
   return marked;
 }
 
+// Japanese is detected by kana: kanji alone is shared with Chinese, so kana is the reliable signal.
+export const KANA = /[぀-ヿ]/;
+
+// Condenses each section's changes into short Chinese points for the notification (Japanese is translated
+// first): one line when it fits, otherwise a few lines. Returns { section: [lines] }; item.text stays
+// original so attribution, learning and baselines are unaffected. Callers fall back to the full
+// paragraph list when this throws.
+export async function condenseWithModel(changes, ask, { maxSections = 20, maxItems = 8, maxLine = 40, maxLines = 4 } = {}) {
+  const sections = new Map();
+  for (const [kind, mark] of [['added', '新增'], ['changed', '修改'], ['removed', '删除']]) {
+    for (const item of changes[kind]) {
+      if (item.level || !item.text.trim()) continue;
+      const key = item.section || '（无标题）';
+      if (!sections.has(key)) sections.set(key, []);
+      if (sections.get(key).length < maxItems) sections.get(key).push(`${mark}：${item.text.slice(0, 300)}`);
+    }
+  }
+  const keys = [...sections.keys()].slice(0, maxSections);
+  if (!keys.length) return {};
+  const payload = keys.map((section, i) => ({ i, section: section.slice(-80), changes: sections.get(section) }));
+  const rows = parseJsonArray(await ask([
+    { role: 'system', content: `你是游戏项目的通知助理。下面每一组是同一标题下的文档变更。把每组精炼成简体中文要点：能一行说清就只写一行；一行写不下时分成多行，每行一个要点，最多 ${maxLines} 行。每行不超过 ${maxLine} 字，说清楚改了什么、需要谁做什么或确认什么；不要把一句话硬拆开。日文先翻译成中文再精炼；忽略图片文件名等附件；数字、ID、角色名、技能名（如 Skill01_EX）保持原样。只输出 JSON 数组，不要解释，格式：[{"i":0,"lines":["要点1","要点2"]}]` },
+    { role: 'user', content: JSON.stringify(payload) },
+  ]));
+  const result = {};
+  for (const row of rows) {
+    const section = keys[Number(row?.i)];
+    const raw = Array.isArray(row?.lines) ? row.lines : [row?.line];
+    const lines = raw.filter(x => typeof x === 'string').map(x => x.trim().replace(/\s+/g, ' ')).filter(Boolean).slice(0, maxLines);
+    if (section && lines.length && !lines.some(x => KANA.test(x))) result[section] = lines;
+  }
+  return result;
+}
+
 export async function summarizeWithModel(title, changes, ask) {
   const clip = list => list.slice(0, 12).map(it => ({ section: it.section || '', text: it.text.slice(0, 120) }));
   const data = { doc: title, added: clip(changes.added), changed: clip(changes.changed), removed: clip(changes.removed) };

@@ -2,12 +2,14 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { readConfig } from './src/config.mjs';
-import { askAI, createHandler, formatGroupHistory } from './src/core.mjs';
+import { askAI, createHandler, formatGroupHistory, messageText } from './src/core.mjs';
 import { createLocalGroupContextStore } from './src/local-group-context.mjs';
 import { createProjectReader } from './src/project-knowledge.mjs';
-import { createWikiKnowledgeBase } from './src/wiki-kb.mjs';
+import { createWikiKnowledgeBase, focusBoost } from './src/wiki-kb.mjs';
+import { createPrivateMemory } from './src/private-memory.mjs';
 import { createRouter } from './src/routing.mjs';
 import { readFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { createDocWatcher } from './src/doc-watch/index.mjs';
 
 async function main() {
@@ -99,6 +101,10 @@ async function main() {
   });
 
   const groupDocuments = createLocalGroupContextStore(join(config.dataDir, 'group-context'));
+  const privateMemory = config.privateMemory.enabled
+    ? createPrivateMemory({ dir: join(config.dataDir, 'private-memory'), ask: messages => askAI(config, messages),
+      scope: config.privateMemory.scope, report: message => console.error(message) })
+    : null;
   const handler = createHandler({
     botId, system: config.system, historyLimit: config.historyLimit, router,
     ask: messages => askAI(config, messages),
@@ -116,8 +122,16 @@ async function main() {
     loadGroupContext: item => groupDocuments.read(item.chatId, item.text),
     saveGroupTurn: (item, answer) => groupDocuments.append(item, answer),
     resetGroupContext: item => groupDocuments.reset(item.chatId),
-    searchWiki: query => wiki.search(query),
-    readLinked: text => wiki.readLinked(text),
+    searchWiki: query => wiki.search(query, 6, { boost: focusBoost(config.wikiFocus, query) }),
+    readLinked: (text, query) => wiki.readLinked(text, query),
+    loadMemory: (item, query) => privateMemory ? privateMemory.read(item, query) : Promise.resolve(''),
+    saveMemory: (item, answer) => privateMemory ? privateMemory.save(item, answer) : Promise.resolve(),
+    // The message the user replied to (e.g. a doc-watch notification), as plain text.
+    loadQuoted: async item => {
+      const response = await client.im.message.get({ path: { message_id: item.parentId } });
+      if (response.code !== 0) throw new Error('读取被回复的消息失败');
+      return messageText(response.data?.items?.[0]);
+    },
     loadProjectContext,
     syncWiki,
     status: () => {
@@ -136,6 +150,15 @@ async function main() {
       if ((await sendPrivate(openId, content)).code !== 0) throw new Error('私信失败');
     },
     handleDirect: item => watcher ? watcher.handleDirectMessage(item) : Promise.resolve(null),
+    recordOpenIds: async people => {
+      const file = join(config.dataDir, 'openids.json');
+      let saved = {};
+      try { saved = JSON.parse(readFileSync(file, 'utf8')); } catch { /* first record */ }
+      const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+      for (const p of people) saved[p.openId] = { name: p.name, recordedAt: now };
+      await mkdir(config.dataDir, { recursive: true });
+      await writeFile(file, JSON.stringify(saved, null, 2), 'utf8');
+    },
     report: message => console.error(message),
   });
 
