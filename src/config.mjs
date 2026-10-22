@@ -14,7 +14,11 @@ export function readConfig(env, fileConfig = null) {
   // AI_PROVIDER: "deepseek" (any Chat Completions API, needs AI_API_KEY) or "codex" (local Codex CLI).
   const provider = (env.AI_PROVIDER || 'deepseek').trim().toLowerCase();
   if (!['deepseek', 'codex'].includes(provider)) throw new Error('AI_PROVIDER 只能是 deepseek 或 codex。');
-  for (const name of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', ...(provider === 'deepseek' ? ['AI_API_KEY'] : [])]) {
+  // CICD build-failure analysis may use its own provider: the build machine waits at most 120 s.
+  const cicdProvider = (env.CICD_AI_PROVIDER || provider).trim().toLowerCase();
+  if (!['deepseek', 'codex'].includes(cicdProvider)) throw new Error('CICD_AI_PROVIDER 只能是 deepseek 或 codex。');
+  const needsKey = provider === 'deepseek' || cicdProvider === 'deepseek';
+  for (const name of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', ...(needsKey ? ['AI_API_KEY'] : [])]) {
     if (!env[name]?.trim() || /replace_me/.test(env[name])) throw new Error(`请在 .env 中填写 ${name}`);
   }
   const base = new URL((env.AI_BASE_URL || 'https://api.deepseek.com/v1').trim());
@@ -44,6 +48,15 @@ export function readConfig(env, fileConfig = null) {
   const privateMemory = { enabled: file.privateMemory?.enabled ?? true, scope: file.privateMemory?.scope === 'user' ? 'user' : 'all' };
   return {
     wikiFocus, privateMemory,
+    cicd: {
+      enabled: !/^(0|false|no)$/i.test(env.CICD_ANALYZE_ENABLED || 'true'),
+      host: env.CICD_ANALYZE_HOST?.trim() || '10.234.30.88',
+      port: intSetting(env, 'CICD_ANALYZE_PORT', 3210, 1, 65535),
+      token: env.CICD_ANALYZE_TOKEN?.trim() || '',
+      provider: cicdProvider,
+      // Leave a margin under the build machine's 120 s so it gets an error instead of hanging up.
+      timeout: intSetting(env, 'CICD_AI_TIMEOUT_SECONDS', 110, 10, 115) * 1000,
+    },
     appId: env.FEISHU_APP_ID.trim(), appSecret: env.FEISHU_APP_SECRET.trim(),
     provider,
     endpoint: base.href.replace(/\/$/, '') + '/chat/completions',

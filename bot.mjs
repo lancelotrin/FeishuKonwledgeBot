@@ -8,6 +8,7 @@ import { createProjectReader } from './src/project-knowledge.mjs';
 import { createWikiKnowledgeBase, focusBoost } from './src/wiki-kb.mjs';
 import { createPrivateMemory } from './src/private-memory.mjs';
 import { createAccessChecker } from './src/doc-access.mjs';
+import { startCicdAnalysisServer } from './src/cicd-analysis.mjs';
 import { createRouter } from './src/routing.mjs';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -167,6 +168,13 @@ async function main() {
     },
     report: message => console.error(message),
   });
+
+  // Build-failure analysis for the OnePiece CICD scripts (independent of Feishu messages).
+  if (config.cicd.enabled) {
+    startCicdAnalysisServer({ host: config.cicd.host, port: config.cicd.port, token: config.cicd.token, system: config.system,
+      ask: messages => askAI({ ...config, provider: config.cicd.provider, timeout: config.cicd.timeout }, messages),
+      loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), report: message => console.error(message) });
+  }
 
   const ws = new lark.WSClient(options);
   ws.start({ eventDispatcher: new lark.EventDispatcher({ logger }).register({
