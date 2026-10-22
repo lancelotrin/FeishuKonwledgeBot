@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseWikiSource } from './wiki-kb.mjs';
+import { DEFAULT_CODEX_PATH } from './codex.mjs';
 
 function intSetting(env, name, fallback, min, max) {
   const value = Number(env[name] || fallback);
@@ -10,7 +11,10 @@ function intSetting(env, name, fallback, min, max) {
 
 // Secrets come from .env; projects, wiki spaces and routing rules from bot.config.json.
 export function readConfig(env, fileConfig = null) {
-  for (const name of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'AI_API_KEY']) {
+  // AI_PROVIDER: "deepseek" (any Chat Completions API, needs AI_API_KEY) or "codex" (local Codex CLI).
+  const provider = (env.AI_PROVIDER || 'deepseek').trim().toLowerCase();
+  if (!['deepseek', 'codex'].includes(provider)) throw new Error('AI_PROVIDER 只能是 deepseek 或 codex。');
+  for (const name of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', ...(provider === 'deepseek' ? ['AI_API_KEY'] : [])]) {
     if (!env[name]?.trim() || /replace_me/.test(env[name])) throw new Error(`请在 .env 中填写 ${name}`);
   }
   const base = new URL((env.AI_BASE_URL || 'https://api.deepseek.com/v1').trim());
@@ -41,9 +45,19 @@ export function readConfig(env, fileConfig = null) {
   return {
     wikiFocus, privateMemory,
     appId: env.FEISHU_APP_ID.trim(), appSecret: env.FEISHU_APP_SECRET.trim(),
+    provider,
     endpoint: base.href.replace(/\/$/, '') + '/chat/completions',
-    apiKey: env.AI_API_KEY.trim(), model: (env.AI_MODEL || 'deepseek-chat').trim(),
-    timeout: intSetting(env, 'AI_TIMEOUT_SECONDS', 120, 1, 600) * 1000,
+    apiKey: (env.AI_API_KEY || '').trim(),
+    model: provider === 'codex' ? `Codex${env.CODEX_MODEL ? ` ${env.CODEX_MODEL.trim()}` : ''}` : (env.AI_MODEL || 'deepseek-chat').trim(),
+    // Codex is an agent and much slower than a plain API call, so it gets a longer default timeout.
+    timeout: intSetting(env, 'AI_TIMEOUT_SECONDS', provider === 'codex' ? 300 : 120, 1, 900) * 1000,
+    codexPath: (env.CODEX_PATH || DEFAULT_CODEX_PATH).trim(),
+    codexModel: (env.CODEX_MODEL || '').trim(),
+    codexReasoning: (env.CODEX_REASONING_EFFORT || '').trim(),
+    codexConcurrency: intSetting(env, 'CODEX_CONCURRENCY', 2, 1, 8),
+    // false (default): skip ~/.codex/config.toml (MCP servers, plugins) and rule files, ~6 s faster per call.
+    codexUseUserConfig: /^(1|true|yes)$/i.test(env.CODEX_USE_USER_CONFIG || ''),
+    codexWorkDir: resolve(env.DATA_DIR || 'data', 'codex-work'),
     temperature: Number(env.AI_TEMPERATURE || 0.3),
     system: env.AI_SYSTEM_PROMPT || file.systemPrompt || '你是团队的项目知识助手，熟悉团队知识库和项目代码。回答准确、简洁，用中文。资料不足时明确说明并建议找谁确认，不要编造。',
     historyLimit: intSetting(env, 'FEISHU_HISTORY_LIMIT', 20, 1, 50),

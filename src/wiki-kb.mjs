@@ -2,7 +2,11 @@
 // Feishu's wiki search API only works with user tokens, so the bot syncs with its app identity and searches locally.
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { chunkText, createBm25Index } from './text-search.mjs';
+import { chunkText, createBm25Index, tokenize } from './text-search.mjs';
+
+// Words that say "a document" rather than what it is about; they must not drive title matching.
+const TITLE_STOP = new Set(['文档', '资料', '相关', '一下', '哪些', '有哪', '都可', '可以', '关的', '的文', '作文',
+  '文件', '说明', '内容', '东西', '找下', '帮我', '给我', '查下', '在哪', '哪里', '所有', '全部']);
 
 const LINK = /https?:\/\/[^\s/]+\/(wiki|docx|docs)\/([A-Za-z0-9]{10,})/g;
 
@@ -269,6 +273,25 @@ export function createWikiKnowledgeBase({ request: rawRequest, sources, cacheDir
     },
 
     // Reads Feishu doc links pasted into the chat directly, even if they are outside the configured spaces.
+    // Documents whose title (or directory path) matches the question, for "which documents are about X"
+    // questions that passage search answers poorly. A title hit is required; path hits only add weight.
+    listTitles(query, limit = 15) {
+      const terms = [...new Set(tokenize(query))].filter(term => !TITLE_STOP.has(term));
+      const scored = [];
+      for (const doc of docs.values()) {
+        const title = doc.title.toLowerCase();
+        const folders = doc.path.slice(0, -1).join('/').toLowerCase();
+        const inTitle = terms.filter(term => title.includes(term));
+        if (!inTitle.length) continue;
+        // Every matched term counts, and a folder about the topic (角色管线, 角色设计相关) adds weight.
+        const score = inTitle.length * 3 + terms.filter(term => folders.includes(term)).length * 2;
+        scored.push({ doc, score });
+      }
+      scored.sort((a, b) => b.score - a.score || a.doc.path.join('/').localeCompare(b.doc.path.join('/')));
+      const lines = scored.slice(0, limit).map(({ doc }) => `- ${doc.path.join(' / ')} ${doc.url}`);
+      return { total: scored.length, context: lines.join('\n'), docs: scored.slice(0, limit).map(x => x.doc) };
+    },
+
     // Long documents are cut down to the passages most relevant to `query`, kept in document order.
     async readLinked(text, query = text, maxChars = 8000) {
       const parts = [];

@@ -8,6 +8,8 @@ import { parseMessage, createHandler, createPostContent, askAI } from '../src/co
 import { createWikiKnowledgeBase, parseWikiSource, parseDocLinks, focusBoost, excerpt } from '../src/wiki-kb.mjs';
 import { createRouter } from '../src/routing.mjs';
 import { createPrivateMemory } from '../src/private-memory.mjs';
+import { createAccessChecker } from '../src/doc-access.mjs';
+import { askCodex, messagesToPrompt } from '../src/codex.mjs';
 import { createProjectReader } from '../src/project-knowledge.mjs';
 import { tokenize, createBm25Index, chunkText } from '../src/text-search.mjs';
 
@@ -192,6 +194,112 @@ test('wiki: node scope syncs one document; 监修 conversations rank 监修 docu
   const q = '装备页面背景图 详细说明\n📌 每周监修会议题';
   assert.equal(kb.search(q, 6, { boost: focusBoost(rules, q) }).docs[0].title, '每周监修会议题');
   assert.equal(kb.search(q).docs.find(d => d.title === '每周监修会议题').priority, true);
+});
+
+test('listTitles: "which documents" questions get every title match, topic folders first', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kb-'));
+  const doc = (token, path) => ({ objToken: token, objType: 'docx', title: path.at(-1), path, url: `u/${token}`, owner: '', editTime: '1', text: 'x' });
+  for (const d of [doc('a', ['美术组', '角色管线', '3D角色制作规范']), doc('b', ['美术组', '角色管线', '角色表情规划']),
+    doc('c', ['策划组', '交互', '预制体规范']), doc('d', ['策划组', '战斗', '首测角色循环问题'])]) {
+    await writeFile(join(dir, `${d.objToken}.json`), JSON.stringify(d));
+  }
+  const kb = createWikiKnowledgeBase({ request: async () => ({}), sources: [], cacheDir: dir });
+  await kb.loadCache();
+  const result = kb.listTitles('跟角色相关的文档都可以', 10);
+  assert.equal(result.total, 3); // 预制体规范 has no 角色 in its title
+  assert.deepEqual(result.docs.slice(0, 2).map(d => d.title).sort(), ['3D角色制作规范', '角色表情规划']);
+  assert.match(result.context, /- 美术组 \/ 角色管线 \/ 3D角色制作规范 u\/a/);
+  assert.equal(kb.listTitles('文档有哪些', 10).total, 0); // generic words alone match nothing
+});
+
+test('outgoing messages never contain clickable Feishu doc links (Feishu would auto-grant read access)', () => {
+  const md = '见 [3D角色制作规范](https://x.feishu.cn/wiki/AbCdEf123456) 和 https://x.feishu.cn/docx/XyZ1234567890\n外链 https://example.com/wiki/abc';
+  const text = JSON.parse(createPostContent(md)).zh_cn.content[0][0].text;
+  assert.equal(text, '见 3D角色制作规范 `https://x.feishu.cn/wiki/AbCdEf123456` 和 `https://x.feishu.cn/docx/XyZ1234567890`\n外链 https://example.com/wiki/abc');
+});
+
+test('doc access: org-wide sharing or direct collaborators are confirmed; anything else is not', async () => {
+  const calls = [];
+  const request = async (method, url) => {
+    calls.push(url);
+    if (url.includes('/public')) return url.includes('OpenDoc0001') ? { code: 0, data: { permission_public: { link_share_entity: 'tenant_readable' } } }
+      : url.includes('NoScope0001') ? { code: 99991672 } : { code: 0, data: { permission_public: { link_share_entity: 'closed' } } };
+    return url.includes('ClosedDoc01') ? { code: 0, data: { items: [{ member_type: 'openid', member_id: 'ou_me' }, { member_type: 'openchat', member_id: 'oc_x' }] } } : { code: 99991672 };
+  };
+  const canRead = createAccessChecker({ request });
+  assert.equal(await canRead('ou_me', 'https://x.feishu.cn/wiki/OpenDoc0001'), true);
+  assert.equal(await canRead('ou_me', 'https://x.feishu.cn/docx/ClosedDoc01'), true); // direct collaborator
+  assert.equal(await canRead('ou_other', 'https://x.feishu.cn/docx/ClosedDoc01'), false); // maybe via the group: not confirmed
+  assert.equal(await canRead('ou_me', 'https://x.feishu.cn/wiki/NoScope0001'), false); // missing scopes fail safe
+  const before = calls.length;
+  await canRead('ou_me', 'https://x.feishu.cn/wiki/OpenDoc0001');
+  assert.equal(calls.length, before); // cached
+});
+
+test('handler: private replies keep links the asker can read clickable; groups never do', async () => {
+  const answer = '见 [规范](https://x.feishu.cn/wiki/MineDoc0001) 和 [设计](https://x.feishu.cn/wiki/LockedDoc01)';
+  for (const chatType of ['p2p', 'group']) {
+    const sent = [];
+    const h = createHandler({ botId: 'bot', system: 'S', ask: async () => answer, send: async (_, c) => sent.push(JSON.parse(c).zh_cn.content[0][0].text),
+      canRead: async (openId, url) => openId === 'u' && url.includes('MineDoc0001') });
+    h.accept({ sender: { sender_type: 'user', sender_id: { open_id: 'u' } }, message: { message_id: `m-${chatType}`, chat_id: 'c', chat_type: chatType,
+      message_type: 'text', mentions: [{ key: '@_user_1', id: { open_id: 'bot' } }], content: JSON.stringify({ text: '@_user_1 规范在哪' }) } });
+    await h.drain();
+    assert.match(sent[0], /设计 `https:\/\/x\.feishu\.cn\/wiki\/LockedDoc01`/);
+    if (chatType === 'p2p') assert.match(sent[0], /\[规范\]\(https:\/\/x\.feishu\.cn\/wiki\/MineDoc0001\)/);
+    else assert.match(sent[0], /规范 `https:\/\/x\.feishu\.cn\/wiki\/MineDoc0001`/);
+  }
+});
+
+test('config: AI_PROVIDER=codex needs no API key and gets a longer timeout; unknown providers are rejected', () => {
+  const config = readConfig({ FEISHU_APP_ID: 'cli_test', FEISHU_APP_SECRET: 's', AI_PROVIDER: 'codex', CODEX_REASONING_EFFORT: 'low' }, {});
+  assert.equal(config.provider, 'codex');
+  assert.equal(config.timeout, 300_000);
+  assert.equal(config.codexReasoning, 'low');
+  assert.match(config.codexPath, /codex\.exe$/);
+  assert.throws(() => readConfig({ ...env, AI_PROVIDER: 'gpt' }, {}), /AI_PROVIDER/);
+  assert.equal(readConfig(env, {}).provider, 'deepseek');
+});
+
+test('codex: messages become one stdin prompt, the -o file is the answer, failures are clear errors', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { writeFileSync } = await import('node:fs');
+  const workDir = await mkdtemp(join(tmpdir(), 'codex-'));
+  const config = { provider: 'codex', codexPath: 'codex.exe', codexWorkDir: workDir, codexReasoning: 'low', timeout: 5000 };
+  let seen;
+  // events: JSON lines written to stdout; close: exit code emitted afterwards (null = never exits by itself)
+  const fakeSpawn = ({ events = [], close = null, file = '' }) => (cmd, args) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.killed = false;
+    child.kill = () => { child.killed = true; setImmediate(() => child.emit('close', null)); };
+    child.stdin = Object.assign(new EventEmitter(), { end: text => {
+      seen = { cmd, args, input: text, child };
+      if (file) writeFileSync(args[args.indexOf('-o') + 1], file);
+      setImmediate(() => {
+        child.stdout.emit('data', events.map(e => JSON.stringify(e)).join('\n') + '\n');
+        if (close !== null) setImmediate(() => child.emit('close', close));
+      });
+    } });
+    return child;
+  };
+  const done = [{ type: 'item.completed', item: { type: 'agent_message', text: '  协程是可暂停的方法。\n' } }, { type: 'turn.completed' }];
+  const messages = [{ role: 'system', content: '规则A' }, { role: 'user', content: '老问题' }, { role: 'assistant', content: '老回答' }, { role: 'user', content: '什么是协程' }];
+  // Answer is returned on turn.completed even though the process has not exited; it is then killed.
+  assert.equal(await askCodex(config, messages, fakeSpawn({ events: done })), '协程是可暂停的方法。');
+  assert.equal(seen.child.killed, true);
+  assert.deepEqual(seen.args.slice(0, 8), ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '--ephemeral', '--json']);
+  assert.ok(seen.args.includes('--ignore-user-config') && seen.args.includes('--ignore-rules'));
+  assert.ok(seen.args.includes('model_reasoning_effort="low"') && seen.args.at(-1) === '-');
+  assert.match(seen.input, /【要求与资料】\n规则A[\s\S]*【之前的对话】\n用户：老问题\n助手：老回答[\s\S]*【当前消息】\n什么是协程$/);
+  await askCodex({ ...config, codexUseUserConfig: true }, messages, fakeSpawn({ events: done }));
+  assert.ok(!seen.args.includes('--ignore-user-config'));
+  // No streamed answer: the -o file is used; nothing at all: a clear error including Codex's message.
+  assert.equal(await askCodex(config, messages, fakeSpawn({ close: 0, file: '文件里的回答' })), '文件里的回答');
+  await assert.rejects(askCodex(config, messages, fakeSpawn({ events: [{ type: 'turn.failed', error: { message: 'quota exceeded' } }], close: 1 })),
+    /Codex 没有返回回答（退出码 1：quota exceeded）/);
+  await assert.rejects(askCodex(config, messages, () => { throw new Error('ENOENT'); }), /无法启动 Codex/);
+  assert.match(messagesToPrompt([{ role: 'user', content: 'hi' }]), /不要执行任何命令[\s\S]*【当前消息】\nhi/);
 });
 
 test('excerpt: long linked documents keep the passages relevant to the question', () => {

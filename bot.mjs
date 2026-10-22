@@ -7,6 +7,7 @@ import { createLocalGroupContextStore } from './src/local-group-context.mjs';
 import { createProjectReader } from './src/project-knowledge.mjs';
 import { createWikiKnowledgeBase, focusBoost } from './src/wiki-kb.mjs';
 import { createPrivateMemory } from './src/private-memory.mjs';
+import { createAccessChecker } from './src/doc-access.mjs';
 import { createRouter } from './src/routing.mjs';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -122,6 +123,8 @@ async function main() {
     loadGroupContext: item => groupDocuments.read(item.chatId, item.text),
     saveGroupTurn: (item, answer) => groupDocuments.append(item, answer),
     resetGroupContext: item => groupDocuments.reset(item.chatId),
+    listDocs: (query, limit) => wiki.listTitles(query, limit),
+    canRead: createAccessChecker({ request }),
     searchWiki: query => wiki.search(query, 6, { boost: focusBoost(config.wikiFocus, query) }),
     readLinked: (text, query) => wiki.readLinked(text, query),
     // "监修文档刚改了什么" → the doc-watch change log.
