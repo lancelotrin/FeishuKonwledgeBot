@@ -54,8 +54,13 @@ export function readConfig(env, fileConfig = null) {
       port: intSetting(env, 'CICD_ANALYZE_PORT', 3210, 1, 65535),
       token: env.CICD_ANALYZE_TOKEN?.trim() || '',
       provider: cicdProvider,
-      // Leave a margin under the build machine's 120 s so it gets an error instead of hanging up.
-      timeout: intSetting(env, 'CICD_AI_TIMEOUT_SECONDS', 110, 10, 115) * 1000,
+      // Leave a margin under the build machine's 120 s for sending the card and replying.
+      timeout: intSetting(env, 'CICD_AI_TIMEOUT_SECONDS', 105, 10, 115) * 1000,
+      // Failure cards are sent by this bot to this group (by name, or the group set with /打包群).
+      notifyChatName: (env.CICD_NOTIFY_CHAT_NAME ?? '打包机器人').trim(),
+      notifyChatId: (env.CICD_NOTIFY_CHAT_ID || '').trim(),
+      // TRIDENT BUILD_USER id → person, maintained by hand and by /trident <id>.
+      usersFile: resolve(env.CICD_TRIDENT_USERS || 'trident-users.json'),
     },
     appId: env.FEISHU_APP_ID.trim(), appSecret: env.FEISHU_APP_SECRET.trim(),
     provider,

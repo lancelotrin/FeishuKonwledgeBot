@@ -147,9 +147,13 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
   loadHistory = async () => [], historyLimit = 20, loadGroupContext = async () => '', saveGroupTurn = async () => {},
   resetGroupContext = async () => {}, searchWiki = () => ({ context: '', docs: [] }), readLinked = async () => '',
   loadProjectContext = async () => ({ context: '', files: [] }), router = null, syncWiki = null, status = () => '',
-  handleDirect = async () => null, recordOpenIds = async () => {}, loadQuoted = async () => '',
+  handleDirect = async () => null, handleCommand = async () => null, recordOpenIds = async () => {}, loadQuoted = async () => '',
   loadMemory = async () => '', saveMemory = async () => {}, loadUpdates = async () => '',
-  listDocs = () => ({ total: 0, context: '', docs: [] }), canRead = async () => false, report = () => {} }) {
+  listDocs = () => ({ total: 0, context: '', docs: [] }), canRead = async () => false, projects = [], report = () => {} }) {
+  // Where the configured projects live: project snippets only carry paths relative to these roots.
+  const projectInfo = projects.length
+    ? `已配置的项目目录（项目资料中的文件路径都相对于对应目录）：\n${projects.map(p => `- ${p.name}：${p.root}`).join('\n')}`
+    : '';
   const seen = new Map();
   const queues = new Map();
   const history = new Map();
@@ -176,7 +180,7 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
       try { await recordOpenIds(people); } catch { report('open_id 记录写入失败。'); }
       return `以下 open_id 仅对当前机器人应用有效：\n\n${people.map(p => `- ${p.name || '（未知）'}：\`${p.openId}\``).join('\n')}`;
     }
-    if (item.text === '/help') return '直接提问即可（群里需 @我）。我会结合飞书知识库、项目代码、群聊记录回答，并 @ 相关负责人。\n\n- `/sync` 立即同步知识库\n- `/status` 查看知识库状态\n- `/reset` 清空当前上下文\n- `/openid @某人` 查看并记录他的 open_id（不带 @ 则查自己）';
+    if (item.text === '/help') return '直接提问即可（群里需 @我）。我会结合飞书知识库、项目代码、群聊记录回答，并 @ 相关负责人。\n\n- `/sync` 立即同步知识库\n- `/status` 查看知识库状态\n- `/reset` 清空当前上下文\n- `/openid @某人` 查看并记录他的 open_id（不带 @ 则查自己）\n- `/打包群` 在群里发送：把打包失败通知发到这个群\n- `/trident 你的ID` 绑定 TRIDENT 用户 ID，打包失败时 @ 你';
     return null;
   }
 
@@ -211,6 +215,7 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
       catch { report('计算相关人失败；本次不通知。'); }
     }
     const context = [{ role: 'system', content: system }, { role: 'system', content: ANSWER_RULES }];
+    if (projectInfo) context.push({ role: 'system', content: projectInfo });
     if (updates) context.push({ role: 'system', content: `被监测文档最近的变更记录（文档监测自动逐段比对得出，按时间从新到旧；问“改了什么 / 最新内容”时以此为准回答，说明变更时间、所在标题和内容）：\n${updates}` });
     if (quoted) context.push({ role: 'system', content: `用户是在回复下面这条消息，问题针对它的内容：\n${quoted.slice(0, 4000)}` });
     if (linked) context.push({ role: 'system', content: `用户消息或被回复消息中引用的飞书文档（与问题最相关的段落）：\n${linked}` });
@@ -255,6 +260,8 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
       let people = [];
       try {
         body = await command(item);
+        // Module commands that work in any chat (e.g. CICD: /打包群, /trident).
+        if (body === null) body = await handleCommand(item).catch(error => error.message);
         // Commands of other modules: doc-watch /bind (also in groups, to bind @mentioned people), 取消推送, clarification numbers.
         if (body === null && (item.chatType === 'p2p' || item.text.startsWith('/bind'))) body = await handleDirect(item).catch(() => null);
         if (body === null) {

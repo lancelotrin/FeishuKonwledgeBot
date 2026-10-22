@@ -9,6 +9,7 @@ import { createWikiKnowledgeBase, focusBoost } from './src/wiki-kb.mjs';
 import { createPrivateMemory } from './src/private-memory.mjs';
 import { createAccessChecker } from './src/doc-access.mjs';
 import { startCicdAnalysisServer } from './src/cicd-analysis.mjs';
+import { createCicdNotifier } from './src/cicd-notify.mjs';
 import { createRouter } from './src/routing.mjs';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -107,7 +108,26 @@ async function main() {
     ? createPrivateMemory({ dir: join(config.dataDir, 'private-memory'), ask: messages => askAI(config, messages),
       scope: config.privateMemory.scope, report: message => console.error(message) })
     : null;
+  // Build-failure cards sent by this app to the build group, @mentioning whoever triggered the build.
+  const readJsonFile = path => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
+  const cicdNotifier = config.cicd.enabled ? createCicdNotifier({ request,
+    chatName: config.cicd.notifyChatName, chatId: config.cicd.notifyChatId,
+    stateFile: join(config.dataDir, 'cicd-chat.json'), usersFile: config.cicd.usersFile,
+    // Names → open_ids this app already knows: doc-watch /bind and /openid records.
+    nameSources: [
+      async name => readJsonFile(join(config.dataDir, 'doc-watch', 'bindings.json'))[name] || '',
+      async name => Object.entries(readJsonFile(join(config.dataDir, 'openids.json'))).find(([, v]) => v?.name === name)?.[0] || '',
+    ],
+    sendCard: async (chatId, card) => {
+      try {
+        return (await client.im.message.create({ params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) } })).code;
+      } catch (error) { return error?.response?.data?.code ?? -1; }
+    },
+    report: message => console.error(message) }) : null;
+
   const handler = createHandler({
+    handleCommand: item => cicdNotifier ? cicdNotifier.handleCommand(item) : Promise.resolve(null),
     botId, system: config.system, historyLimit: config.historyLimit, router,
     ask: messages => askAI(config, messages),
     react: item => config.ackEmoji
@@ -125,6 +145,7 @@ async function main() {
     saveGroupTurn: (item, answer) => groupDocuments.append(item, answer),
     resetGroupContext: item => groupDocuments.reset(item.chatId),
     listDocs: (query, limit) => wiki.listTitles(query, limit),
+    projects: config.projects.map(p => ({ name: p.name, root: p.root })),
     canRead: createAccessChecker({ request }),
     searchWiki: query => wiki.search(query, 6, { boost: focusBoost(config.wikiFocus, query) }),
     readLinked: (text, query) => wiki.readLinked(text, query),
@@ -173,7 +194,7 @@ async function main() {
   if (config.cicd.enabled) {
     startCicdAnalysisServer({ host: config.cicd.host, port: config.cicd.port, token: config.cicd.token, system: config.system,
       ask: messages => askAI({ ...config, provider: config.cicd.provider, timeout: config.cicd.timeout }, messages),
-      loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), report: message => console.error(message) });
+      loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), notifier: cicdNotifier, report: message => console.error(message) });
   }
 
   const ws = new lark.WSClient(options);

@@ -7,3 +7,4 @@ bot.config.json
 doc-watch.mapping.json
 bot.config.test.json
 .env.bak*
+trident-users.json

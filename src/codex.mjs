@@ -18,7 +18,7 @@ export function messagesToPrompt(messages) {
   const last = turns.at(-1);
   const earlier = turns.slice(0, -1).map(m => `${m.role === 'assistant' ? '助手' : '用户'}：${m.content}`);
   return [
-    '你是飞书机器人的回答引擎。下面已经提供了回答所需的全部资料：不要执行任何命令，不要读取或修改文件，不要联网，直接输出给用户看的最终回答（不要输出思考过程或额外说明）。',
+    '你是飞书机器人的回答引擎。下面已经提供了回答所需的全部资料：不要执行任何命令，不要读取或修改文件，不要联网，直接输出给用户看的最终回答（不要输出思考过程或额外说明）。你当前所在的工作目录只是运行用的临时空目录，与任何项目无关，不要把它当作项目路径或资料来源。',
     system.length ? `【要求与资料】\n${system.join('\n\n')}` : '',
     earlier.length ? `【之前的对话】\n${earlier.join('\n')}` : '',
     last ? `【当前消息】\n${last.content}` : '',

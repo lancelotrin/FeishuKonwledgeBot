@@ -93,7 +93,7 @@ export function createCicdAnalysisMessages(system, payload, projectContext = '')
 }
 
 export function startCicdAnalysisServer({ host, port, token = '', system, ask, loadProjectContext, archiveDir = '',
-  report = console.error, log = console.log }) {
+  notifier = null, report = console.error, log = console.log }) {
   const server = http.createServer((request, response) => {
     if (request.method !== 'POST' || request.url !== '/cicd/analyze') { response.writeHead(404).end(); return; }
     if (token && request.headers.authorization !== `Bearer ${token}`) { response.writeHead(401).end(); return; }
@@ -107,9 +107,13 @@ export function startCicdAnalysisServer({ host, port, token = '', system, ask, l
     request.on('end', async () => {
       const started = Date.now();
       const raw = Buffer.concat(chunks).toString('utf8');
-      let payload = null;
+      const reply = (status, value) => response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(value));
+      let payload;
+      try { payload = JSON.parse(raw); } catch { reply(400, { error: '请求不是有效的 JSON' }); return; }
+      archive(archiveDir, payload).catch(() => {});
+      let analysis = '';
+      let failure = null;
       try {
-        payload = JSON.parse(raw);
         const { keyErrors } = digestBuildLog(typeof payload.log === 'string' ? payload.log : '');
         let projectContext = '';
         try {
@@ -117,16 +121,18 @@ export function startCicdAnalysisServer({ host, port, token = '', system, ask, l
           projectContext = typeof found === 'string' ? found : found?.context || '';
         } catch { report('[CICD AI] 读取项目资料失败，将仅分析日志。'); }
         const answer = (await ask(createCicdAnalysisMessages(system, payload, projectContext))).replace(/\n{3,}/g, '\n\n').trim();
-        const body = JSON.stringify({ analysis: Array.from(answer).slice(0, 6000).join('') });
-        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(body);
+        analysis = Array.from(answer).slice(0, 6000).join('');
         log(`[CICD AI] 已分析：${String(payload.meta?.pipeline || payload.meta?.flow || '').slice(0, 60)}，日志 ${String(payload.log || '').length} 字符，关键报错 ${keyErrors} 条，用时 ${Math.round((Date.now() - started) / 1000)} 秒`);
-        archive(archiveDir, payload).catch(() => {});
       } catch (error) {
+        failure = error;
         report(`[CICD AI] 分析失败（用时 ${Math.round((Date.now() - started) / 1000)} 秒）：${error?.message || error}`);
-        if (payload) archive(archiveDir, payload).catch(() => {});
-        const body = JSON.stringify({ error: error?.message || '分析失败' });
-        response.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }).end(body);
       }
+      // notify: the build machine asks this bot to send the failure card itself (with or without analysis).
+      // It only skips its own webhook notification when we answer notified: true.
+      let notified = false;
+      if (payload?.notify === true && notifier) notified = await notifier.notify(payload, analysis).catch(() => false);
+      if (failure && !notified) reply(400, { error: failure?.message || '分析失败', notified: false });
+      else reply(200, { analysis, notified });
     });
   });
   server.on('clientError', (_, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));

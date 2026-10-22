@@ -405,6 +405,16 @@ test('private memory: turns are condensed into keyword records and found by late
   assert.equal(await own.read({ userId: 'u2', text: '打包失败' }, '打包失败'), ''); // scope "user": other people cannot see it
 });
 
+test('handler: the configured project roots are given to the model', async () => {
+  const prompts = [];
+  const h = createHandler({ botId: 'bot', system: 'S', send: async () => {}, projects: [{ name: 'OnePiece', root: 'D:/OnePiece/onepiece' }],
+    ask: async messages => { prompts.push(messages.map(m => m.content).join('\n')); return 'ok'; } });
+  h.accept({ sender: { sender_type: 'user', sender_id: { open_id: 'u' } }, message: { message_id: 'pp', chat_id: 'c', chat_type: 'p2p',
+    message_type: 'text', content: JSON.stringify({ text: '我们项目路径在哪' }) } });
+  await h.drain();
+  assert.match(prompts[0], /已配置的项目目录[\s\S]*- OnePiece：D:\/OnePiece\/onepiece/);
+});
+
 test('handler: private answers are saved to memory and memory is offered to later questions', async () => {
   const saved = [];
   const prompts = [];
