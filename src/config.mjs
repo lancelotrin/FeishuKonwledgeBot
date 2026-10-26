@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseWikiSource } from './wiki-kb.mjs';
-import { DEFAULT_CODEX_PATH } from './codex.mjs';
 
 function intSetting(env, name, fallback, min, max) {
   const value = Number(env[name] || fallback);
@@ -69,7 +68,8 @@ export function readConfig(env, fileConfig = null) {
     model: provider === 'codex' ? `Codex${env.CODEX_MODEL ? ` ${env.CODEX_MODEL.trim()}` : ''}` : (env.AI_MODEL || 'deepseek-chat').trim(),
     // Codex is an agent and much slower than a plain API call, so it gets a longer default timeout.
     timeout: intSetting(env, 'AI_TIMEOUT_SECONDS', provider === 'codex' ? 300 : 120, 1, 900) * 1000,
-    codexPath: (env.CODEX_PATH || DEFAULT_CODEX_PATH).trim(),
+    // Empty: the newest Codex install is found on each call (see resolveCodexPath).
+    codexPath: (env.CODEX_PATH || '').trim(),
     codexModel: (env.CODEX_MODEL || '').trim(),
     codexReasoning: (env.CODEX_REASONING_EFFORT || '').trim(),
     codexConcurrency: intSetting(env, 'CODEX_CONCURRENCY', 2, 1, 8),

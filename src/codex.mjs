@@ -6,11 +6,32 @@
 // CODEX_USE_USER_CONFIG=true (~6 s per call), and the answer is taken from the --json event stream as
 // soon as the turn completes, without waiting several seconds for the process to shut down.
 import { spawn } from 'node:child_process';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { mkdir, readFile, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export const DEFAULT_CODEX_PATH = 'C:\\Users\\Administrator\\AppData\\Local\\OpenAI\\Codex\\bin\\6257d9e8f63c0f2b\\codex.exe';
+// The Codex desktop app installs the CLI under bin/<hash>/codex.exe and the hash changes with every update.
+export const CODEX_BIN_DIR = join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin');
+
+// Newest bin/<hash>/codex.exe, or '' when none is installed.
+export function findCodex(binDir = CODEX_BIN_DIR) {
+  let dirs;
+  try { dirs = readdirSync(binDir); } catch { return ''; }
+  let best = '', bestTime = -1;
+  for (const dir of dirs) {
+    const exe = join(binDir, dir, 'codex.exe');
+    try { const time = statSync(exe).mtimeMs; if (time > bestTime) { best = exe; bestTime = time; } } catch {}
+  }
+  return best;
+}
+
+// CODEX_PATH empty, or an absolute path that no longer exists (Codex updated): use the newest install.
+// A bare name such as `codex` is left for PATH lookup. Resolved on every call, so updates need no restart.
+export function resolveCodexPath(configured, find = findCodex) {
+  if (configured && (!isAbsolute(configured) || existsSync(configured))) return configured;
+  return find() || configured || 'codex';
+}
 
 export function messagesToPrompt(messages) {
   const system = messages.filter(m => m.role === 'system').map(m => m.content);
@@ -52,8 +73,9 @@ const limiters = new Map();
 function runTurn(config, prompt, outFile, spawnImpl) {
   return new Promise((resolve, reject) => {
     let child;
-    try { child = spawnImpl(config.codexPath, codexArgs(config, outFile), { cwd: config.codexWorkDir, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
-    catch { reject(new Error(`无法启动 Codex，请检查 CODEX_PATH（${config.codexPath}）。`)); return; }
+    const codexPath = resolveCodexPath(config.codexPath);
+    try { child = spawnImpl(codexPath, codexArgs(config, outFile), { cwd: config.codexWorkDir, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
+    catch { reject(new Error(`无法启动 Codex，请检查 CODEX_PATH（${codexPath}）。`)); return; }
     let answer = '';
     let failure = '';
     let settled = false;
@@ -80,7 +102,7 @@ function runTurn(config, prompt, outFile, spawnImpl) {
         else if (event.type === 'turn.completed' && answer) finish(null, answer);
       }
     });
-    child.on('error', () => finish(new Error(`无法启动 Codex，请检查 CODEX_PATH（${config.codexPath}）。`)));
+    child.on('error', () => finish(new Error(`无法启动 Codex，请检查 CODEX_PATH（${codexPath}）。`)));
     child.on('close', async code => {
       if (settled) return;
       // No streamed answer: fall back to the -o file (older CLI versions), else report the failure.
