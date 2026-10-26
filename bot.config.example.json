@@ -20,6 +20,11 @@
       ]
     }
   ],
+  "codex": {
+    "projectDirs": [
+      "D:/OnePiece/onepiece"
+    ]
+  },
   "routing": {
     "notifyDocOwners": true,
     "maxNotify": 3,

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { readConfig } from '../src/config.mjs';
 import { parseMessage, createHandler, createPostContent, askAI } from '../src/core.mjs';
 import { createWikiKnowledgeBase, parseWikiSource, parseDocLinks, focusBoost, excerpt } from '../src/wiki-kb.mjs';
@@ -213,10 +213,13 @@ test('listTitles: "which documents" questions get every title match, topic folde
   assert.equal(kb.listTitles('文档有哪些', 10).total, 0); // generic words alone match nothing
 });
 
-test('outgoing messages never contain clickable Feishu doc links (Feishu would auto-grant read access)', () => {
-  const md = '见 [3D角色制作规范](https://x.feishu.cn/wiki/AbCdEf123456) 和 https://x.feishu.cn/docx/XyZ1234567890\n外链 https://example.com/wiki/abc';
+test('outgoing doc links go through the AppLink redirect (a raw doc link would make Feishu auto-grant read access)', () => {
+  const md = '见 [3D角色制作规范](https://x.feishu.cn/wiki/AbCdEf123456) 和 https://x.feishu.cn/docx/XyZ1234567890 及 `https://x.feishu.cn/wiki/CodeLink0001`\n外链 https://example.com/wiki/abc\n```\nhttps://x.feishu.cn/wiki/InFence00001\n```';
   const text = JSON.parse(createPostContent(md)).zh_cn.content[0][0].text;
-  assert.equal(text, '见 3D角色制作规范 `https://x.feishu.cn/wiki/AbCdEf123456` 和 `https://x.feishu.cn/docx/XyZ1234567890`\n外链 https://example.com/wiki/abc');
+  const r = url => `https://applink.feishu.cn/client/web_url/open?mode=window&url=${encodeURIComponent(url)}`;
+  assert.equal(text, `见 [3D角色制作规范](${r('https://x.feishu.cn/wiki/AbCdEf123456')}) 和 [打开文档](${r('https://x.feishu.cn/docx/XyZ1234567890')}) `
+    + `及 [打开文档](${r('https://x.feishu.cn/wiki/CodeLink0001')})\n外链 https://example.com/wiki/abc\n\`\`\`\nhttps://x.feishu.cn/wiki/InFence00001\n\`\`\``);
+  assert.doesNotMatch(text.replace(/```[\s\S]*```/, ''), /(?<!url=)https:\/\/x\.feishu\.cn/);
 });
 
 test('doc access: org-wide sharing or direct collaborators are confirmed; anything else is not', async () => {
@@ -237,7 +240,7 @@ test('doc access: org-wide sharing or direct collaborators are confirmed; anythi
   assert.equal(calls.length, before); // cached
 });
 
-test('handler: private replies keep links the asker can read clickable; groups never do', async () => {
+test('handler: private replies link directly to docs the asker can read; everything else via the redirect', async () => {
   const answer = '见 [规范](https://x.feishu.cn/wiki/MineDoc0001) 和 [设计](https://x.feishu.cn/wiki/LockedDoc01)';
   for (const chatType of ['p2p', 'group']) {
     const sent = [];
@@ -246,9 +249,9 @@ test('handler: private replies keep links the asker can read clickable; groups n
     h.accept({ sender: { sender_type: 'user', sender_id: { open_id: 'u' } }, message: { message_id: `m-${chatType}`, chat_id: 'c', chat_type: chatType,
       message_type: 'text', mentions: [{ key: '@_user_1', id: { open_id: 'bot' } }], content: JSON.stringify({ text: '@_user_1 规范在哪' }) } });
     await h.drain();
-    assert.match(sent[0], /设计 `https:\/\/x\.feishu\.cn\/wiki\/LockedDoc01`/);
+    assert.match(sent[0], /\[设计\]\(https:\/\/applink\.feishu\.cn\/client\/web_url\/open\?mode=window&url=https%3A%2F%2Fx\.feishu\.cn%2Fwiki%2FLockedDoc01\)/);
     if (chatType === 'p2p') assert.match(sent[0], /\[规范\]\(https:\/\/x\.feishu\.cn\/wiki\/MineDoc0001\)/);
-    else assert.match(sent[0], /规范 `https:\/\/x\.feishu\.cn\/wiki\/MineDoc0001`/);
+    else assert.match(sent[0], /\[规范\]\(https:\/\/applink\.feishu\.cn\/[^)]*MineDoc0001\)/);
   }
 });
 
@@ -301,6 +304,20 @@ test('codex: messages become one stdin prompt, the -o file is the answer, failur
     /Codex 没有返回回答（退出码 1：quota exceeded）/);
   await assert.rejects(askCodex(config, messages, () => { throw new Error('ENOENT'); }), /无法启动 Codex/);
   assert.match(messagesToPrompt([{ role: 'user', content: 'hi' }]), /不要执行任何命令[\s\S]*【当前消息】\nhi/);
+  // Configured project dirs: Codex runs read-only in the first existing one and the prompt lists them;
+  // missing dirs are skipped and the answer file stays in the bot's work dir.
+  const projectDir = await mkdtemp(join(tmpdir(), 'proj-'));
+  await askCodex({ ...config, codexProjectDirs: [join(projectDir, 'missing'), projectDir] }, messages, fakeSpawn({ events: done }));
+  assert.equal(seen.args[seen.args.indexOf('-C') + 1], projectDir);
+  assert.ok(seen.args[seen.args.indexOf('-o') + 1].startsWith(workDir));
+  assert.ok(seen.args.includes('read-only'));
+  assert.match(seen.input, new RegExp(`只读地查看以下项目目录[\\s\\S]*- ${projectDir.replace(/\\/g, '\\\\')}\\n只能读取这些目录，不要修改`));
+  assert.doesNotMatch(seen.input, /missing/);
+});
+
+test('config: codex.projectDirs comes from bot.config.json and defaults to none', () => {
+  assert.deepEqual(readConfig(env, {}).codexProjectDirs, []);
+  assert.deepEqual(readConfig(env, { codex: { projectDirs: ['D:/Proj'] } }).codexProjectDirs, [resolve('D:/Proj')]);
 });
 
 test('cicd: prompt has reason, metadata, log and the untrusted-data guard; long logs keep error lines and the tail', () => {

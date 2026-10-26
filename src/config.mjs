@@ -76,6 +76,8 @@ export function readConfig(env, fileConfig = null) {
     // false (default): skip ~/.codex/config.toml (MCP servers, plugins) and rule files, ~6 s faster per call.
     codexUseUserConfig: /^(1|true|yes)$/i.test(env.CODEX_USE_USER_CONFIG || ''),
     codexWorkDir: resolve(env.DATA_DIR || 'data', 'codex-work'),
+    // bot.config.json codex.projectDirs: directories Codex may read (read-only) to check code. Empty = none.
+    codexProjectDirs: (file.codex?.projectDirs || []).map(dir => resolve(dir)),
     temperature: Number(env.AI_TEMPERATURE || 0.3),
     system: env.AI_SYSTEM_PROMPT || file.systemPrompt || '你是团队的项目知识助手，熟悉团队知识库和项目代码。回答准确、简洁，用中文。资料不足时明确说明并建议找谁确认，不要编造。',
     historyLimit: intSetting(env, 'FEISHU_HISTORY_LIMIT', 20, 1, 50),

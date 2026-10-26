@@ -193,7 +193,8 @@ async function main() {
   // Build-failure analysis for the OnePiece CICD scripts (independent of Feishu messages).
   if (config.cicd.enabled) {
     startCicdAnalysisServer({ host: config.cicd.host, port: config.cicd.port, token: config.cicd.token, system: config.system,
-      ask: messages => askAI({ ...config, provider: config.cicd.provider, timeout: config.cicd.timeout }, messages),
+      // No project browsing here: the build machine waits at most 120 s.
+      ask: messages => askAI({ ...config, provider: config.cicd.provider, timeout: config.cicd.timeout, codexProjectDirs: [] }, messages),
       loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), notifier: cicdNotifier, report: message => console.error(message) });
   }
 
