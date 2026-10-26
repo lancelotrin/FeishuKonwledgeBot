@@ -30,12 +30,12 @@ function keywordRoutes(item, mapping) {
 }
 
 // Feature map (mapping.features): the planner who wrote a feature's design docs also gets changes that
-// mention it, on top of the module owners; a feature's `exclude` words switch it off. At most `limit`
-// features per change, to keep noise down.
-export function featureMatches(item, mapping, limit = 3) {
+// mention it, on top of the module owners; a feature's `exclude` words switch it off. Every matching
+// feature counts, so a change touching several features reaches all their planners.
+export function featureMatches(item, mapping) {
   const whole = `${item.section || ''} ${item.text}`;
   return (mapping.features || []).filter(f => f.owner && (f.keywords || []).some(k => k && whole.includes(k))
-    && !(f.exclude || []).some(k => k && whole.includes(k))).slice(0, limit);
+    && !(f.exclude || []).some(k => k && whole.includes(k)));
 }
 
 // Returns { keys: route keys, people: extra owner names (topics / cc / feature planners), via: which layer decided }.

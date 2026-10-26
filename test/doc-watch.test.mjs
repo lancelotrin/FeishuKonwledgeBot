@@ -61,6 +61,9 @@ test('attribution: feature planners are added on top of module owners; a feature
   assert.deepEqual(attribute({ section: 's', text: '月卡价格' }, withFeatures).keys, ['level']); // no module keyword
   assert.deepEqual(attribute({ section: 's', text: '技能' }, withFeatures).people, []);
   assert.deepEqual(attribute({ section: 's', text: '罗宾汉技能' }, withFeatures).people, []); // excluded
+  // Several features in one change: every planner is notified, no cap.
+  const many = { ...mapping, features: ['图鉴', '材料本', '商店', '月卡'].map((k, n) => ({ name: k, route: 'level', owner: `策划${n}`, keywords: [k] })) };
+  assert.deepEqual(attribute({ section: 's', text: '图鉴、材料本、商店、月卡 UI 通过监修' }, many).people, ['策划0', '策划1', '策划2', '策划3']);
 });
 
 function fakeFeishu() {
