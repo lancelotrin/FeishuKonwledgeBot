@@ -49,6 +49,20 @@ test('attribution: learned > topics > model > keywords, with exclusions and char
   assert.deepEqual(parseDocSource({ url: 'https://x.feishu.cn/wiki/BE3Fwb3q5ieqUAkcxRhcqDTjnxf' }).token, 'BE3Fwb3q5ieqUAkcxRhcqDTjnxf');
 });
 
+test('attribution: feature planners are added on top of module owners; a feature alone picks its module', () => {
+  const withFeatures = { ...mapping, features: [
+    { name: 'SR 罗宾 角色设计', route: 'battle', owner: '祝宽圻', keywords: ['罗宾'], exclude: ['罗宾汉'] },
+    { name: '月卡', route: 'level', owner: '张洋滔', keywords: ['月卡'] },
+  ] };
+  const both = attribute({ section: 's', text: '罗宾技能调整' }, withFeatures);
+  assert.deepEqual(both.keys, ['battle']);
+  assert.deepEqual(both.people, ['祝宽圻']);
+  assert.match(both.via, /功能「SR 罗宾 角色设计」/);
+  assert.deepEqual(attribute({ section: 's', text: '月卡价格' }, withFeatures).keys, ['level']); // no module keyword
+  assert.deepEqual(attribute({ section: 's', text: '技能' }, withFeatures).people, []);
+  assert.deepEqual(attribute({ section: 's', text: '罗宾汉技能' }, withFeatures).people, []); // excluded
+});
+
 function fakeFeishu() {
   const state = { edit: 1000, blocks: [page(['h', 'a']), text('h', '10月20日', 3), text('a', '路飞技能A')], sent: [], failFor: new Set() };
   const request = async (method, url) => {

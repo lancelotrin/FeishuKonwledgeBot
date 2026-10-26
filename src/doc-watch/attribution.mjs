@@ -1,5 +1,6 @@
 // Decides which module owners a change belongs to. Priority:
-// learned (confirmed by a person) > cross-module topics > model judgement > keyword rules.
+// learned (confirmed by a person) > cross-module topics > model judgement > keyword rules;
+// feature planners (mapping.features) are added on top of whichever layer decided.
 // The mapping file format is the one used by the original Python bot (mapping.json).
 
 const DIGIT_ORDER = ['battle', 'level', 'system', 'num', 'text', 'audio', 'art', 'interact'];
@@ -28,8 +29,27 @@ function keywordRoutes(item, mapping) {
   return [...new Set(hits)];
 }
 
-// Returns { keys: route keys, people: extra owner names (topics / cc), via: which layer decided }.
+// Feature map (mapping.features): the planner who wrote a feature's design docs also gets changes that
+// mention it, on top of the module owners; a feature's `exclude` words switch it off. At most `limit`
+// features per change, to keep noise down.
+export function featureMatches(item, mapping, limit = 3) {
+  const whole = `${item.section || ''} ${item.text}`;
+  return (mapping.features || []).filter(f => f.owner && (f.keywords || []).some(k => k && whole.includes(k))
+    && !(f.exclude || []).some(k => k && whole.includes(k))).slice(0, limit);
+}
+
+// Returns { keys: route keys, people: extra owner names (topics / cc / feature planners), via: which layer decided }.
+// A change that matches no module but does match a feature goes to that feature's module.
 export function attribute(item, mapping, learned = {}) {
+  const base = moduleAttribute(item, mapping, learned);
+  const hits = featureMatches(item, mapping);
+  if (!hits.length) return base;
+  const keys = base.keys.length ? base.keys : [...new Set(hits.map(f => f.route).filter(Boolean))];
+  return { keys, people: [...new Set([...base.people, ...hits.map(f => f.owner)])],
+    via: `${base.keys.length ? base.via : '功能对照表'}；功能「${hits.map(f => f.name).join('、')}」` };
+}
+
+function moduleAttribute(item, mapping, learned) {
   const section = item.section || '';
   if (section && learned[section]?.length) return { keys: learned[section], people: [], via: '人工确认' };
   const whole = `${section} ${item.text}`;
