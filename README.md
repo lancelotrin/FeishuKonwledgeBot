@@ -42,6 +42,11 @@
     // 路径用正斜杠；guides 为每次都会带上的项目说明文档；excludes 追加排除目录
     { "name": "OnePiece", "root": "D:/OnePiece/onepiece", "guides": ["Client/Assets/MD~/README.md"], "excludes": ["Packages"] }
   ],
+  "codex": {
+    // AI_PROVIDER=codex 时，Codex 可只读查看的项目目录（在第一个目录里运行）；留空则 Codex 只用提示里的资料
+    // CICD 打包分析不会查看目录（打包机最多等 120 秒）
+    "projectDirs": ["D:/OnePiece/onepiece"]
+  },
   "routing": {
     "notifyDocOwners": true,   // 命中知识库文档的负责人也作为候选
     "maxNotify": 3,
