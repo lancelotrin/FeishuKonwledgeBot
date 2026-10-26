@@ -95,7 +95,8 @@ export function createCicdAnalysisMessages(system, payload, projectContext = '')
 export function startCicdAnalysisServer({ host, port, token = '', system, ask, loadProjectContext, archiveDir = '',
   notifier = null, report = console.error, log = console.log }) {
   const server = http.createServer((request, response) => {
-    if (request.method !== 'POST' || request.url !== '/cicd/analyze') { response.writeHead(404).end(); return; }
+    // /cicd/analyze: failure log analysis (+ failure card); /cicd/card: success cards (APK / Patch / HybridCLR).
+    if (request.method !== 'POST' || !['/cicd/analyze', '/cicd/card'].includes(request.url)) { response.writeHead(404).end(); return; }
     if (token && request.headers.authorization !== `Bearer ${token}`) { response.writeHead(401).end(); return; }
     const chunks = [];
     let size = 0;
@@ -110,6 +111,11 @@ export function startCicdAnalysisServer({ host, port, token = '', system, ask, l
       const reply = (status, value) => response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(value));
       let payload;
       try { payload = JSON.parse(raw); } catch { reply(400, { error: '请求不是有效的 JSON' }); return; }
+      if (request.url === '/cicd/card') {
+        const notified = notifier ? await notifier.notifyCard(payload).catch(() => false) : false;
+        reply(200, { notified });
+        return;
+      }
       archive(archiveDir, payload).catch(() => {});
       let analysis = '';
       let failure = null;

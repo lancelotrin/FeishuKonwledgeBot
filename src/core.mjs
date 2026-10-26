@@ -116,17 +116,22 @@ export function splitReply(text, limit = 2500) {
 
 // Feishu "post" content: Markdown paragraph plus an optional paragraph of real @mentions.
 // Feishu automatically grants chat members read access to any cloud doc whose link is sent into the
-// chat, using the sender's permission. The bot must never grant access, so doc URLs are sent as inline
-// code (copyable text, not a recognised link); people without access request it on the doc page.
-// `keepLink(url)` lets a link through when the recipient is already confirmed to have read access.
+// chat, using the sender's permission. The bot must never grant access, so doc links stay clickable but
+// point at an AppLink redirect, which Feishu does not recognise as a doc link; the raw URL never appears
+// in the text. People without access request it themselves on the doc page.
+// `keepLink(url)` lets a direct link through when the recipient is already confirmed to have read access.
 const DOC_URL = /https?:\/\/[^\s/]*(?:feishu\.cn|larksuite\.com|larkoffice\.com)\/(?:wiki|docx|docs|sheets|base|file|mindnotes|slides|drive)\/[A-Za-z0-9]+[^\s`)）\]]*/.source;
-const DOC_MD_LINK = new RegExp('\\[([^\\]]*)\\]\\((' + DOC_URL + ')\\)', 'g');
-const DOC_BARE_URL = new RegExp('(^|[^`])(' + DOC_URL + ')', 'gm');
-export function unlinkDocUrls(markdown, keepLink = () => false) {
+// Markdown link | inline-code URL | bare URL.
+const DOC_LINK = new RegExp(`\\[([^\\]]*)\\]\\((${DOC_URL})\\)|\`(${DOC_URL})\`|(${DOC_URL})`, 'g');
+export function redirectUrl(url) {
+  return `https://applink.feishu.cn/client/web_url/open?mode=window&url=${encodeURIComponent(url)}`;
+}
+export function wrapDocUrls(markdown, keepLink = () => false) {
   const parts = markdown.split(/(```[\s\S]*?```)/); // leave fenced code blocks alone
-  return parts.map((part, n) => n % 2 ? part : part
-    .replace(DOC_MD_LINK, (whole, title, url) => keepLink(url) ? whole : `${title} \`${url}\``)
-    .replace(DOC_BARE_URL, (whole, before, url) => keepLink(url) ? whole : `${before}\`${url}\``)).join('');
+  return parts.map((part, n) => n % 2 ? part : part.replace(DOC_LINK, (whole, title, mdUrl, codeUrl, bareUrl) => {
+    const url = mdUrl || codeUrl || bareUrl;
+    return `[${title?.trim() || '打开文档'}](${keepLink(url) ? url : redirectUrl(url)})`;
+  })).join('');
 }
 
 export function findDocUrls(markdown) {
@@ -134,7 +139,7 @@ export function findDocUrls(markdown) {
 }
 
 export function createPostContent(markdown, mentions = [], mentionLabel = '请相关同学关注：', { keepLink } = {}) {
-  const content = [[{ tag: 'md', text: unlinkDocUrls(markdown.replace(/\n{3,}/g, '\n\n').trim(), keepLink) }]];
+  const content = [[{ tag: 'md', text: wrapDocUrls(markdown.replace(/\n{3,}/g, '\n\n').trim(), keepLink) }]];
   if (mentions.length) content.push([{ tag: 'text', text: mentionLabel }, ...mentions.map(p => ({ tag: 'at', user_id: p.openId }))]);
   return JSON.stringify({ zh_cn: { content } });
 }
@@ -274,7 +279,7 @@ export function createHandler({ botId, system, ask, send, sendDirect = async () 
       const inGroup = item.chatType === 'group';
       if (!inGroup && people.length) parts[parts.length - 1] += `\n\n建议联系：${people.map(p => p.name || '文档负责人').join('、')}`;
       // Private chat: links to docs the asker can already read are sent clickable (no access is granted);
-      // everything else stays plain text. Any failed or uncertain check counts as "cannot read".
+      // everything else goes through the AppLink redirect. Any failed or uncertain check counts as "cannot read".
       const readable = new Set();
       if (!inGroup) {
         for (const url of findDocUrls(body).slice(0, 15)) {
