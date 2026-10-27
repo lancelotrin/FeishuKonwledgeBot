@@ -112,7 +112,7 @@ async function main() {
   const readJsonFile = path => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
   const cicdNotifier = config.cicd.enabled ? createCicdNotifier({ request,
     chatName: config.cicd.notifyChatName, chatId: config.cicd.notifyChatId,
-    stateFile: join(config.dataDir, 'cicd-chat.json'), usersFile: config.cicd.usersFile,
+    stateFile: join(config.dataDir, 'cicd-chat.json'), usersFile: config.cicd.usersFile, failureAlsoAt: config.cicd.failureAlsoAt,
     // Names → open_ids this app already knows: doc-watch /bind and /openid records.
     nameSources: [
       async name => readJsonFile(join(config.dataDir, 'doc-watch', 'bindings.json'))[name] || '',

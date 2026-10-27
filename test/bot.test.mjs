@@ -377,7 +377,8 @@ test('config: CICD analysis defaults and its own provider with a timeout under t
   const config = readConfig({ ...env, AI_PROVIDER: 'codex', CICD_AI_PROVIDER: 'deepseek' }, {});
   const { usersFile, ...cicd } = config.cicd;
   assert.deepEqual(cicd, { enabled: true, host: '10.234.30.88', port: 3210, token: '', provider: 'deepseek', timeout: 105_000,
-    replyBudget: 100_000, notifyChatName: '打包机器人', notifyChatId: '' });
+    replyBudget: 100_000, failureAlsoAt: [], notifyChatName: '打包机器人', notifyChatId: '' });
+  assert.deepEqual(readConfig({ ...env, CICD_FAILURE_ALSO_AT: '葛相麟, 张三，李四' }, {}).cicd.failureAlsoAt, ['葛相麟', '张三', '李四']);
   assert.match(usersFile, /trident-users[.]json$/);
   assert.equal(readConfig({ ...env, CICD_ANALYZE_ENABLED: 'false' }, {}).cicd.enabled, false);
   assert.throws(() => readConfig({ FEISHU_APP_ID: 'a', FEISHU_APP_SECRET: 'b', AI_PROVIDER: 'codex', CICD_AI_PROVIDER: 'deepseek' }, {}), /AI_API_KEY/);
@@ -606,4 +607,23 @@ test('cicd endpoint: a slow analysis never makes the build machine wait past the
     assert.ok(Date.now() - started < 2000);
     assert.deepEqual(cards, ['']);
   } finally { server.close(); }
+});
+
+test('cicd notify: failures also @ the configured people, without doubling the trigger or adding to @all', async () => {
+  const ge = { name: '葛相麟', openId: 'ou_ge' };
+  const at = (person, also) => buildFailureCard({ reason: 'x', meta: {} }, '', person, also).elements[0].text.content.split(' 原因')[0];
+  assert.equal(at({ name: '张三', openId: 'ou_zs' }, [ge]), '<at id=ou_zs></at><at id=ou_ge></at>');
+  assert.equal(at(ge, [ge]), '<at id=ou_ge></at>'); // trigger is 葛相麟 himself: once
+  assert.equal(at(null, [ge]), '<at id=all></at>'); // unknown trigger: @all already covers him
+  assert.equal(at({ name: '张三', openId: 'ou_zs' }, [{ name: '找不到', openId: '' }]), '<at id=ou_zs></at>');
+
+  const dir = await mkdtemp(join(tmpdir(), 'also-'));
+  await writeFile(join(dir, 'users.json'), JSON.stringify({ 3031: { name: '黄川', openId: 'ou_hc' } }));
+  const sent = [];
+  const n = createCicdNotifier({ request: async () => ({ code: 404 }), chatId: 'oc', stateFile: join(dir, 'c.json'), usersFile: join(dir, 'users.json'),
+    nameSources: [async name => name === '葛相麟' ? 'ou_ge' : ''], failureAlsoAt: ['葛相麟'], sendCard: async (chat, card) => { sent.push(card); return 0; } });
+  await n.notify({ reason: 'x', meta: { buildUser: '3031' } }, '');
+  assert.match(sent[0].elements[0].text.content, /^<at id=ou_hc><\/at><at id=ou_ge><\/at> 原因：x\n触发人：黄川/);
+  await n.notifyCard({ webhook: { card: { elements: [{ tag: 'div', text: { tag: 'lark_md', content: '包名' } }] } }, meta: { buildUser: '3031' } });
+  assert.doesNotMatch(sent[1].elements[0].text.content, /ou_ge/); // success cards unchanged
 });

@@ -17,9 +17,14 @@ async function writeJson(path, value) {
 
 const META_LABELS = [['pipeline', '管线'], ['branch', '分支'], ['version', '版本'], ['flow', '流程'], ['packageBuildType', '类型'], ['hotfixChannel', '热更渠道'], ['buildUser', '触发人ID'], ['defines', '宏']];
 
-export function buildFailureCard(payload, analysis, person) {
+// `alsoAt`: people @mentioned on every failure as well (CICD_FAILURE_ALSO_AT), skipped when they are the
+// trigger or when the card already @mentions everyone (unknown trigger).
+export function buildFailureCard(payload, analysis, person, alsoAt = []) {
   const meta = payload?.meta && typeof payload.meta === 'object' ? payload.meta : {};
-  const at = person?.openId ? `<at id=${person.openId}></at>` : '<at id=all></at>';
+  const extra = person?.openId
+    ? [...new Set(alsoAt.map(p => p?.openId).filter(id => id && id !== person.openId))].map(id => `<at id=${id}></at>`).join('')
+    : '';
+  const at = person?.openId ? `<at id=${person.openId}></at>${extra}` : '<at id=all></at>';
   const job = meta.jobName ? `流水线：${meta.jobName}${meta.buildNumber ? ` #${meta.buildNumber}` : ''}` : '';
   // An unknown trigger is shown as 旅行者; the numeric TRIDENT ID is listed with the build info (触发人ID).
   const trigger = `触发人：${person?.name || '旅行者'}`;
@@ -48,7 +53,7 @@ export function withTrigger(card, person) {
   return copy;
 }
 
-export function createCicdNotifier({ request, sendCard, chatName = '', chatId = '', stateFile, usersFile, nameSources = [], report = () => {} }) {
+export function createCicdNotifier({ request, sendCard, chatName = '', chatId = '', stateFile, usersFile, nameSources = [], failureAlsoAt = [], report = () => {} }) {
   let cachedChat = chatId;
 
   async function resolveChat() {
@@ -75,13 +80,17 @@ export function createCicdNotifier({ request, sendCard, chatName = '', chatId = 
     const entry = users[String(buildUser)] || {};
     if (entry.openId) return { name: entry.name || '', openId: entry.openId };
     if (!entry.name) return { name: '', openId: '' };
+    return resolveName(entry.name);
+  }
+
+  async function resolveName(name) {
     for (const source of nameSources) {
-      const openId = await source(entry.name).catch(() => '');
-      if (openId) return { name: entry.name, openId };
+      const openId = await source(name).catch(() => '');
+      if (openId) return { name, openId };
     }
     // Last resort: the build group's own member list (people who never talked to the bot are found here too).
-    const member = (await groupMembers().catch(() => [])).find(m => m.name === entry.name);
-    return { name: entry.name, openId: member?.member_id || '' };
+    const member = (await groupMembers().catch(() => [])).find(m => m.name === name);
+    return { name, openId: member?.member_id || '' };
   }
 
   let membersCache = { at: 0, chat: '', items: [] };
@@ -111,7 +120,8 @@ export function createCicdNotifier({ request, sendCard, chatName = '', chatId = 
       const chat = await resolveChat();
       if (!chat) return false;
       const person = await resolvePerson(payload?.meta?.buildUser).catch(() => null);
-      const card = buildFailureCard(payload, analysis, person);
+      const alsoAt = await Promise.all(failureAlsoAt.map(name => resolveName(name).catch(() => null)));
+      const card = buildFailureCard(payload, analysis, person, alsoAt);
       const code = await sendCard(chat, card).catch(() => -1);
       if (code !== 0) report(`[CICD 通知] 发送失败卡片失败（错误码 ${code}），打包机将改用 webhook 发送。`);
       return code === 0;
