@@ -11,6 +11,7 @@ import { createPrivateMemory } from '../src/private-memory.mjs';
 import { createAccessChecker } from '../src/doc-access.mjs';
 import { askCodex, messagesToPrompt } from '../src/codex.mjs';
 import { createCicdAnalysisMessages, digestBuildLog, startCicdAnalysisServer } from '../src/cicd-analysis.mjs';
+import { createCicdNotifier, buildFailureCard, withTrigger } from '../src/cicd-notify.mjs';
 import { createProjectReader } from '../src/project-knowledge.mjs';
 import { tokenize, createBm25Index, chunkText } from '../src/text-search.mjs';
 
@@ -360,21 +361,24 @@ test('cicd: endpoint checks the token and returns {analysis}; failures return {e
   try {
     assert.equal((await post({ reason: 'x' }, 'Bearer wrong')).status, 401);
     const ok = await post({ reason: '打包失败', log: 'error', meta: {} });
-    assert.deepEqual(await ok.json(), { analysis: '根因：缺少依赖' });
+    assert.deepEqual(await ok.json(), { analysis: '根因：缺少依赖', notified: false });
     let saved = [];
     for (let i = 0; i < 50 && !saved.length; i++) { await new Promise(r => setTimeout(r, 10)); saved = await readdir(archiveDir); }
     const { readFileSync } = await import('node:fs');
     assert.equal(readFileSync(join(archiveDir, saved[0]), 'utf8'), 'error'); // the log only: no reason, meta or analysis
     const bad = await post({ reason: 'boom' });
     assert.equal(bad.status, 400);
-    assert.deepEqual(await bad.json(), { error: 'AI 挂了' });
+    assert.deepEqual(await bad.json(), { error: 'AI 挂了', notified: false });
     assert.match(reports.join('\n'), /分析失败.*AI 挂了/);
   } finally { server.close(); }
 });
 
 test('config: CICD analysis defaults and its own provider with a timeout under the build machine limit', () => {
   const config = readConfig({ ...env, AI_PROVIDER: 'codex', CICD_AI_PROVIDER: 'deepseek' }, {});
-  assert.deepEqual(config.cicd, { enabled: true, host: '10.234.30.88', port: 3210, token: '', provider: 'deepseek', timeout: 110_000 });
+  const { usersFile, ...cicd } = config.cicd;
+  assert.deepEqual(cicd, { enabled: true, host: '10.234.30.88', port: 3210, token: '', provider: 'deepseek', timeout: 105_000,
+    replyBudget: 100_000, notifyChatName: '打包机器人', notifyChatId: '' });
+  assert.match(usersFile, /trident-users[.]json$/);
   assert.equal(readConfig({ ...env, CICD_ANALYZE_ENABLED: 'false' }, {}).cicd.enabled, false);
   assert.throws(() => readConfig({ FEISHU_APP_ID: 'a', FEISHU_APP_SECRET: 'b', AI_PROVIDER: 'codex', CICD_AI_PROVIDER: 'deepseek' }, {}), /AI_API_KEY/);
 });
@@ -523,4 +527,83 @@ test('/openid lists and records the open_ids of @mentioned people, or the sender
   assert.deepEqual(recorded.map(p => p.openId), ['ou_a', 'ou_b']);
   h.accept(groupEvent('o2', '@_user_1 /openid')); await h.drain();
   assert.match(replies[1], /小王：`asker`/);
+});
+
+// ---------------------------------------------------------------- CICD notifications (restored)
+test('cicd notify: failure card @mentions the trigger, unknown trigger is 旅行者 with @all, build info lists ID and macros', () => {
+  const meta = { buildUser: '3416', jobName: 'iOS-Main', buildNumber: '6', branch: 'main',
+    defines: 'ENABLE_GSDK=false，ENABLE_DEVOPS=false，ENABLE_UNITY_GM=true，IsOnline=false' };
+  const text = buildFailureCard({ reason: 'Unity 构建失败', meta }, '根因：缺少依赖', { name: '葛相麟', openId: 'ou_ge' }).elements[0].text.content;
+  assert.equal(text, '<at id=ou_ge></at> 原因：Unity 构建失败\n触发人：葛相麟\n流水线：iOS-Main #6\n分支：main\n触发人ID：3416\n'
+    + '宏：ENABLE_GSDK=false，ENABLE_DEVOPS=false，ENABLE_UNITY_GM=true，IsOnline=false\n\n**AI 报错分析**\n根因：缺少依赖');
+  const unknown = buildFailureCard({ reason: 'x', meta: { buildUser: '9' } }, '', null).elements[0].text.content;
+  assert.match(unknown, /^<at id=all><\/at> 原因：x\n触发人：旅行者\n/);
+  assert.match(unknown, /AI 分析暂不可用/);
+});
+
+test('cicd notify: success card gets the trigger line; unknown trigger is 旅行者 without @all; original untouched', () => {
+  const card = { header: { template: 'green' }, elements: [{ tag: 'div', text: { tag: 'lark_md', content: '包名：a.apk' } }, { tag: 'action', actions: [{ url: 'qr' }] }] };
+  assert.equal(withTrigger(card, { name: '葛相麟', openId: 'ou_ge' }).elements[0].text.content, '<at id=ou_ge></at> 触发人：葛相麟\n包名：a.apk');
+  assert.equal(withTrigger(card, null).elements[0].text.content, '触发人：旅行者\n包名：a.apk');
+  assert.equal(card.elements[0].text.content, '包名：a.apk');
+});
+
+test('cicd notify: person from mapping file, bind sources, then build-group members; /trident and /打包群', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'notify-'));
+  const usersFile = join(dir, 'users.json');
+  await writeFile(usersFile, JSON.stringify({ 3416: { name: '葛相麟' }, 3031: { name: '黄川' }, 7: { name: '无名' } }));
+  let memberCalls = 0;
+  const request = async (method, url) => {
+    if (url === '/open-apis/im/v1/chats') return { code: 0, data: { items: [{ name: '打包机器人', chat_id: 'oc_build' }], has_more: false } };
+    if (url === '/open-apis/im/v1/chats/oc_build/members') { memberCalls++; return { code: 0, data: { items: [{ name: '黄川', member_id: 'ou_hc' }], has_more: false } }; }
+    return { code: 404 };
+  };
+  const sent = [];
+  const n = createCicdNotifier({ request, chatName: '打包机器人', stateFile: join(dir, 'chat.json'), usersFile,
+    nameSources: [async name => name === '葛相麟' ? 'ou_ge' : ''], sendCard: async (chat, card) => { sent.push([chat, card]); return 0; } });
+  assert.deepEqual(await n.resolvePerson('3416'), { name: '葛相麟', openId: 'ou_ge' });
+  assert.deepEqual(await n.resolvePerson('3031'), { name: '黄川', openId: 'ou_hc' });
+  assert.deepEqual(await n.resolvePerson('7'), { name: '无名', openId: '' });
+  assert.equal(memberCalls, 1); // member list cached
+  assert.equal(await n.notify({ reason: 'x', meta: { buildUser: '3416' } }, 'a'), true);
+  assert.equal(sent[0][0], 'oc_build');
+  assert.match(await n.handleCommand({ text: '/trident 7', userId: 'ou_wm', chatType: 'p2p' }), /已绑定 TRIDENT ID 7/);
+  assert.deepEqual(await n.resolvePerson('7'), { name: '无名', openId: 'ou_wm' });
+  assert.match(await n.handleCommand({ text: '/打包群', chatType: 'group', chatId: 'oc_new', userId: 'u' }), /已设置/);
+  assert.equal(await n.notifyCard({ webhook: { card: { elements: [] } }, meta: {} }), true);
+  assert.equal(sent.at(-1)[0], 'oc_new');
+});
+
+test('cicd endpoint: notify=true sends the card (even if AI fails), /cicd/card forwards success cards', async () => {
+  const cards = [];
+  const notifier = { notify: async (p, a) => { cards.push(['fail', p.reason, a]); return !p.reason.includes('nogroup'); },
+    notifyCard: async body => { cards.push(['card', body.meta?.buildUser]); return true; } };
+  const server = startCicdAnalysisServer({ host: '127.0.0.1', port: 0, system: 'S', log: () => {}, report: () => {}, notifier,
+    ask: async m => m.at(-1).content.includes('aifail') ? Promise.reject(new Error('AI 超时')) : '根因：X', loadProjectContext: async () => '' });
+  await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/cicd`;
+  const post = async (path, body) => { const r = await fetch(base + path, { method: 'POST', body: JSON.stringify(body) }); return [r.status, await r.json()]; };
+  try {
+    assert.deepEqual(await post('/analyze', { reason: 'ok', notify: true }), [200, { analysis: '根因：X', notified: true }]);
+    assert.deepEqual(await post('/analyze', { reason: 'aifail', notify: true }), [200, { analysis: '', notified: true }]);
+    assert.deepEqual(await post('/analyze', { reason: 'aifail nogroup', notify: true }), [400, { error: 'AI 超时', notified: false }]);
+    assert.deepEqual(await post('/analyze', { reason: 'old script' }), [200, { analysis: '根因：X', notified: false }]);
+    assert.deepEqual(await post('/card', { webhook: { card: {} }, meta: { buildUser: '3416' } }), [200, { notified: true }]);
+    assert.deepEqual(cards.at(-1), ['card', '3416']);
+  } finally { server.close(); }
+});
+
+test('cicd endpoint: a slow analysis never makes the build machine wait past the reply budget', async () => {
+  const cards = [];
+  const notifier = { notify: async (payload, analysis) => { cards.push(analysis); return true; } };
+  const server = startCicdAnalysisServer({ host: '127.0.0.1', port: 0, system: 'S', log: () => {}, report: () => {}, notifier, replyBudgetMs: 300,
+    ask: () => new Promise(() => {}), loadProjectContext: () => new Promise(resolve => setTimeout(() => resolve(''), 10_000)) });
+  await new Promise(resolve => server.once('listening', resolve));
+  try {
+    const started = Date.now();
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/cicd/analyze`, { method: 'POST', body: JSON.stringify({ reason: 'x', notify: true }) });
+    assert.deepEqual(await r.json(), { analysis: '', notified: true }); // card goes out without analysis; build machine skips its webhook
+    assert.ok(Date.now() - started < 2000);
+    assert.deepEqual(cards, ['']);
+  } finally { server.close(); }
 });

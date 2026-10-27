@@ -195,7 +195,7 @@ async function main() {
     startCicdAnalysisServer({ host: config.cicd.host, port: config.cicd.port, token: config.cicd.token, system: config.system,
       // No project browsing here: the build machine waits at most 120 s.
       ask: messages => askAI({ ...config, provider: config.cicd.provider, timeout: config.cicd.timeout, codexProjectDirs: [] }, messages),
-      loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), notifier: cicdNotifier, report: message => console.error(message) });
+      loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), notifier: cicdNotifier, replyBudgetMs: config.cicd.replyBudget, report: message => console.error(message) });
   }
 
   const ws = new lark.WSClient(options);

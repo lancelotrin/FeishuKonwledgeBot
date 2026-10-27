@@ -55,6 +55,9 @@ export function readConfig(env, fileConfig = null) {
       provider: cicdProvider,
       // Leave a margin under the build machine's 120 s for sending the card and replying.
       timeout: intSetting(env, 'CICD_AI_TIMEOUT_SECONDS', 105, 10, 115) * 1000,
+      // Hard limit for the whole reply (project search + AI), so the build machine (120 s) never times out
+      // and double-notifies through its webhook.
+      replyBudget: intSetting(env, 'CICD_REPLY_BUDGET_SECONDS', 100, 20, 115) * 1000,
       // Failure cards are sent by this bot to this group (by name, or the group set with /打包群).
       notifyChatName: (env.CICD_NOTIFY_CHAT_NAME ?? '打包机器人').trim(),
       notifyChatId: (env.CICD_NOTIFY_CHAT_ID || '').trim(),

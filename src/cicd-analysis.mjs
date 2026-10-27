@@ -93,7 +93,7 @@ export function createCicdAnalysisMessages(system, payload, projectContext = '')
 }
 
 export function startCicdAnalysisServer({ host, port, token = '', system, ask, loadProjectContext, archiveDir = '',
-  notifier = null, report = console.error, log = console.log }) {
+  notifier = null, replyBudgetMs = 100_000, report = console.error, log = console.log }) {
   const server = http.createServer((request, response) => {
     // /cicd/analyze: failure log analysis (+ failure card); /cicd/card: success cards (APK / Patch / HybridCLR).
     if (request.method !== 'POST' || !['/cicd/analyze', '/cicd/card'].includes(request.url)) { response.writeHead(404).end(); return; }
@@ -121,12 +121,24 @@ export function startCicdAnalysisServer({ host, port, token = '', system, ask, l
       let failure = null;
       try {
         const { keyErrors } = digestBuildLog(typeof payload.log === 'string' ? payload.log : '');
-        let projectContext = '';
-        try {
-          const found = await loadProjectContext(`CICD 打包失败 ${payload.reason || ''}`);
-          projectContext = typeof found === 'string' ? found : found?.context || '';
-        } catch { report('[CICD AI] 读取项目资料失败，将仅分析日志。'); }
-        const answer = (await ask(createCicdAnalysisMessages(system, payload, projectContext))).replace(/\n{3,}/g, '\n\n').trim();
+        // The build machine gives up after 120 s and then sends its own webhook notification, which would
+        // duplicate our card. Project search + AI must finish within replyBudgetMs of the request arriving;
+        // otherwise the card goes out without analysis and the build machine still gets its answer in time.
+        let timer;
+        const deadline = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`分析超过 ${Math.round(replyBudgetMs / 1000)} 秒未完成，先发送不带分析的通知`)),
+            Math.max(0, replyBudgetMs - (Date.now() - started)));
+        });
+        const work = (async () => {
+          let projectContext = '';
+          try {
+            const found = await loadProjectContext(`CICD 打包失败 ${payload.reason || ''}`);
+            projectContext = typeof found === 'string' ? found : found?.context || '';
+          } catch { report('[CICD AI] 读取项目资料失败，将仅分析日志。'); }
+          return ask(createCicdAnalysisMessages(system, payload, projectContext));
+        })();
+        work.catch(() => {}); // a result arriving after the deadline is dropped
+        const answer = (await Promise.race([work, deadline]).finally(() => clearTimeout(timer))).replace(/\n{3,}/g, '\n\n').trim();
         analysis = Array.from(answer).slice(0, 6000).join('');
         log(`[CICD AI] 已分析：${String(payload.meta?.pipeline || payload.meta?.flow || '').slice(0, 60)}，日志 ${String(payload.log || '').length} 字符，关键报错 ${keyErrors} 条，用时 ${Math.round((Date.now() - started) / 1000)} 秒`);
       } catch (error) {
