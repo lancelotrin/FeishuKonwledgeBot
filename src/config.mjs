@@ -58,7 +58,17 @@ export function readConfig(env, fileConfig = null) {
       // Hard limit for the whole reply (project search + AI), so the build machine (120 s) never times out
       // and double-notifies through its webhook.
       replyBudget: intSetting(env, 'CICD_REPLY_BUDGET_SECONDS', 100, 20, 115) * 1000,
+      // Zeus hotfix reminders in the build group (webhook bot cards): reply with @所有人.
+      zeusWatch: {
+        enabled: !/^(0|false|no)$/i.test(env.ZEUS_WATCH_ENABLED || 'true'),
+        senderId: (env.ZEUS_WATCH_SENDER ?? 'cli_c08abc1da138d00f').trim(),
+        title: (env.ZEUS_WATCH_TITLE ?? 'Zeus热更系统提醒').trim(),
+        text: (env.ZEUS_WATCH_TEXT || '请留意上面的 Zeus 热更系统提醒，及时登录 Zeus 热更后台发布正式版本。').trim(),
+        intervalMs: intSetting(env, 'ZEUS_WATCH_SECONDS', 30, 10, 3600) * 1000,
+      },
       // People @mentioned on every build failure in addition to the trigger (comma-separated names).
+      // bot.config.json → cicd.pipelineAt: { "管线名包含的文字": ["飞书姓名", …] }, @mentioned on that pipeline's notifications.
+      pipelineAt: file.cicd?.pipelineAt && typeof file.cicd.pipelineAt === 'object' ? file.cicd.pipelineAt : {},
       failureAlsoAt: (env.CICD_FAILURE_ALSO_AT || '').split(/[,，、\s]+/).map(x => x.trim()).filter(Boolean),
       // Failure cards are sent by this bot to this group (by name, or the group set with /打包群).
       notifyChatName: (env.CICD_NOTIFY_CHAT_NAME ?? '打包机器人').trim(),

@@ -105,5 +105,12 @@
       ]
     },
     "wikiBase": "https://rcnc3bm8lc5c.feishu.cn/wiki"
+  },
+  "cicd": {
+    "pipelineAt": {
+      "性能测试【Main】": [
+        "黄树强"
+      ]
+    }
   }
 }

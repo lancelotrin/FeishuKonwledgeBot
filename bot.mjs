@@ -10,6 +10,7 @@ import { createPrivateMemory } from './src/private-memory.mjs';
 import { createAccessChecker } from './src/doc-access.mjs';
 import { startCicdAnalysisServer } from './src/cicd-analysis.mjs';
 import { createCicdNotifier } from './src/cicd-notify.mjs';
+import { createZeusWatcher } from './src/zeus-watch.mjs';
 import { createRouter } from './src/routing.mjs';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -112,7 +113,7 @@ async function main() {
   const readJsonFile = path => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
   const cicdNotifier = config.cicd.enabled ? createCicdNotifier({ request,
     chatName: config.cicd.notifyChatName, chatId: config.cicd.notifyChatId,
-    stateFile: join(config.dataDir, 'cicd-chat.json'), usersFile: config.cicd.usersFile, failureAlsoAt: config.cicd.failureAlsoAt,
+    stateFile: join(config.dataDir, 'cicd-chat.json'), usersFile: config.cicd.usersFile, failureAlsoAt: config.cicd.failureAlsoAt, pipelineAt: config.cicd.pipelineAt,
     // Names → open_ids this app already knows: doc-watch /bind and /openid records.
     nameSources: [
       async name => readJsonFile(join(config.dataDir, 'doc-watch', 'bindings.json'))[name] || '',
@@ -196,6 +197,21 @@ async function main() {
       // No project browsing here: the build machine waits at most 120 s.
       ask: messages => askAI({ ...config, provider: config.cicd.provider, timeout: config.cicd.timeout, codexProjectDirs: [] }, messages),
       loadProjectContext, archiveDir: join(config.dataDir, 'cicd'), notifier: cicdNotifier, replyBudgetMs: config.cicd.replyBudget, report: message => console.error(message) });
+  }
+
+  // Zeus hotfix reminders posted by the Zeus webhook bot in the build group: reply with @所有人.
+  if (cicdNotifier && config.cicd.zeusWatch.enabled) {
+    const zeus = config.cicd.zeusWatch;
+    createZeusWatcher({ request, resolveChat: () => cicdNotifier.resolveChat(), stateFile: join(config.dataDir, 'zeus-watch.json'),
+      senderId: zeus.senderId, title: zeus.title, text: zeus.text, intervalMs: zeus.intervalMs,
+      reply: async (messageId, text) => {
+        try {
+          return (await client.im.message.reply({ path: { message_id: messageId },
+            data: { msg_type: 'text', content: JSON.stringify({ text: `<at user_id="all"></at> ${text}` }) } })).code;
+        } catch (error) { return error?.response?.data?.code ?? -1; }
+      },
+      report: message => console.error(message), log: message => console.log(message) }).start();
+    console.log(`[Zeus 提醒] 已开启：每 ${zeus.intervalMs / 1000} 秒检查打包群，看到「${zeus.title}」就回复 @所有人。`);
   }
 
   const ws = new lark.WSClient(options);

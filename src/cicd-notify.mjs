@@ -43,17 +43,30 @@ export function buildFailureCard(payload, analysis, person, alsoAt = []) {
 
 // Success cards (APK / Patch / HybridCLR) arrive as the build machine's finished webhook card; this adds
 // the trigger line and @mention to its first text block. Unknown triggers are 旅行者 without @all.
-export function withTrigger(card, person) {
+export function withTrigger(card, person, alsoAt = []) {
   const copy = JSON.parse(JSON.stringify(card || {}));
   const elements = Array.isArray(copy.elements) ? copy.elements : (copy.elements = []);
-  const line = `${person?.openId ? `<at id=${person.openId}></at> ` : ''}触发人：${person?.name || '旅行者'}`;
+  const ids = [...new Set([person?.openId, ...alsoAt.map(p => p?.openId)].filter(Boolean))];
+  const line = `${ids.map(id => `<at id=${id}></at>`).join('')}${ids.length ? ' ' : ''}触发人：${person?.name || '旅行者'}`;
   const block = elements.find(el => el?.tag === 'div' && el.text?.tag === 'lark_md');
   if (block) block.text.content = `${line}\n${block.text.content || ''}`;
   else elements.unshift({ tag: 'div', text: { tag: 'lark_md', content: line } });
   return copy;
 }
 
-export function createCicdNotifier({ request, sendCard, chatName = '', chatId = '', stateFile, usersFile, nameSources = [], failureAlsoAt = [], report = () => {} }) {
+// The pipeline name of a success card is only in its text ("管线：…"); failure payloads carry meta.pipeline.
+export function cardPipeline(card) {
+  const text = (card?.elements || []).map(el => el?.text?.content || '').join('\n');
+  return text.match(/管线：([^\n]+)/)?.[1]?.trim() || '';
+}
+
+// pipelineAt: { "性能测试【Main】": ["黄树强"] } — extra people @mentioned on every notification (success and
+// failure) of a pipeline whose name contains the key.
+export function createCicdNotifier({ request, sendCard, chatName = '', chatId = '', stateFile, usersFile, nameSources = [], failureAlsoAt = [],
+  pipelineAt = {}, report = () => {} }) {
+  const pipelineNames = pipeline => Object.entries(pipelineAt)
+    .filter(([key]) => key && pipeline && String(pipeline).includes(key)).flatMap(([, names]) => [].concat(names));
+
   let cachedChat = chatId;
 
   async function resolveChat() {
@@ -120,7 +133,8 @@ export function createCicdNotifier({ request, sendCard, chatName = '', chatId = 
       const chat = await resolveChat();
       if (!chat) return false;
       const person = await resolvePerson(payload?.meta?.buildUser).catch(() => null);
-      const alsoAt = await Promise.all(failureAlsoAt.map(name => resolveName(name).catch(() => null)));
+      const names = [...new Set([...pipelineNames(payload?.meta?.pipeline), ...failureAlsoAt])];
+      const alsoAt = await Promise.all(names.map(name => resolveName(name).catch(() => null)));
       const card = buildFailureCard(payload, analysis, person, alsoAt);
       const code = await sendCard(chat, card).catch(() => -1);
       if (code !== 0) report(`[CICD 通知] 发送失败卡片失败（错误码 ${code}），打包机将改用 webhook 发送。`);
@@ -134,7 +148,8 @@ export function createCicdNotifier({ request, sendCard, chatName = '', chatId = 
       const chat = await resolveChat();
       if (!chat) return false;
       const person = await resolvePerson(body?.meta?.buildUser).catch(() => null);
-      const code = await sendCard(chat, withTrigger(card, person)).catch(() => -1);
+      const alsoAt = await Promise.all(pipelineNames(body?.meta?.pipeline || cardPipeline(card)).map(name => resolveName(name).catch(() => null)));
+      const code = await sendCard(chat, withTrigger(card, person, alsoAt)).catch(() => -1);
       if (code !== 0) report(`[CICD 通知] 发送打包结果卡片失败（错误码 ${code}），打包机将改用 webhook 发送。`);
       return code === 0;
     },

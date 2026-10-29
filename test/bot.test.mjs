@@ -11,7 +11,8 @@ import { createPrivateMemory } from '../src/private-memory.mjs';
 import { createAccessChecker } from '../src/doc-access.mjs';
 import { askCodex, messagesToPrompt } from '../src/codex.mjs';
 import { createCicdAnalysisMessages, digestBuildLog, startCicdAnalysisServer } from '../src/cicd-analysis.mjs';
-import { createCicdNotifier, buildFailureCard, withTrigger } from '../src/cicd-notify.mjs';
+import { createCicdNotifier, buildFailureCard, withTrigger, cardPipeline } from '../src/cicd-notify.mjs';
+import { createZeusWatcher, isZeusReminder } from '../src/zeus-watch.mjs';
 import { createProjectReader } from '../src/project-knowledge.mjs';
 import { tokenize, createBm25Index, chunkText } from '../src/text-search.mjs';
 
@@ -377,7 +378,9 @@ test('config: CICD analysis defaults and its own provider with a timeout under t
   const config = readConfig({ ...env, AI_PROVIDER: 'codex', CICD_AI_PROVIDER: 'deepseek' }, {});
   const { usersFile, ...cicd } = config.cicd;
   assert.deepEqual(cicd, { enabled: true, host: '10.234.30.88', port: 3210, token: '', provider: 'deepseek', timeout: 105_000,
-    replyBudget: 100_000, failureAlsoAt: [], notifyChatName: '打包机器人', notifyChatId: '' });
+    replyBudget: 100_000, pipelineAt: {}, failureAlsoAt: [], notifyChatName: '打包机器人', notifyChatId: '',
+    zeusWatch: { enabled: true, senderId: 'cli_c08abc1da138d00f', title: 'Zeus热更系统提醒',
+      text: '请留意上面的 Zeus 热更系统提醒，及时登录 Zeus 热更后台发布正式版本。', intervalMs: 30_000 } });
   assert.deepEqual(readConfig({ ...env, CICD_FAILURE_ALSO_AT: '葛相麟, 张三，李四' }, {}).cicd.failureAlsoAt, ['葛相麟', '张三', '李四']);
   assert.match(usersFile, /trident-users[.]json$/);
   assert.equal(readConfig({ ...env, CICD_ANALYZE_ENABLED: 'false' }, {}).cicd.enabled, false);
@@ -626,4 +629,56 @@ test('cicd notify: failures also @ the configured people, without doubling the t
   assert.match(sent[0].elements[0].text.content, /^<at id=ou_hc><\/at><at id=ou_ge><\/at> 原因：x\n触发人：黄川/);
   await n.notifyCard({ webhook: { card: { elements: [{ tag: 'div', text: { tag: 'lark_md', content: '包名' } }] } }, meta: { buildUser: '3031' } });
   assert.doesNotMatch(sent[1].elements[0].text.content, /ou_ge/); // success cards unchanged
+});
+
+test('zeus reminders: matched by sender or card title; new ones get an @all reply once; first run only records', async () => {
+  const zeusCard = (id, t, sender = 'cli_zeus') => ({ message_id: id, create_time: String(t), msg_type: 'interactive',
+    sender: { id: sender, sender_type: 'app' }, body: { content: JSON.stringify({ title: 'Zeus热更系统提醒', elements: [] }) } });
+  const human = (id, t) => ({ message_id: id, create_time: String(t), sender: { id: 'ou_x', sender_type: 'user' }, body: { content: '{"text":"Zeus热更系统提醒"}' } });
+  assert.equal(isZeusReminder(zeusCard('a', 1), { senderId: 'cli_zeus' }), true);
+  assert.equal(isZeusReminder(zeusCard('b', 1, 'cli_other'), { senderId: 'cli_zeus' }), false); // other bot
+  assert.equal(isZeusReminder(zeusCard('b2', 1, 'cli_other'), { senderId: '' }), true); // title alone when no sender filter
+  const buildFail = { message_id: 'f', create_time: '1', sender: { id: 'cli_zeus', sender_type: 'app' },
+    body: { content: JSON.stringify({ title: '打包失败', elements: [] }) } };
+  assert.equal(isZeusReminder(buildFail, { senderId: 'cli_zeus' }), false); // same webhook bot, but a build failure card
+  assert.equal(isZeusReminder(human('c', 1), { senderId: 'cli_zeus' }), false); // people quoting it don't count
+
+  const dir = await mkdtemp(join(tmpdir(), 'zeus-'));
+  let items = [zeusCard('old', 100)];
+  const replies = [];
+  let fail = false;
+  const w = createZeusWatcher({ request: async () => ({ code: 0, data: { items } }), resolveChat: async () => 'oc_build',
+    stateFile: join(dir, 's.json'), senderId: 'cli_zeus', text: '请发布',
+    reply: async (id, text) => { if (fail) return 230027; replies.push([id, text]); return 0; } });
+  assert.equal(await w.check(), 0); // first run: old reminder not announced
+  items = [human('h', 250), zeusCard('new1', 200), zeusCard('old', 100)];
+  assert.equal(await w.check(), 1);
+  assert.deepEqual(replies, [['new1', '请发布']]);
+  assert.equal(await w.check(), 0); // not repeated
+  fail = true;
+  items = [zeusCard('new2', 300), ...items];
+  assert.equal(await w.check(), 0);
+  fail = false;
+  assert.equal(await w.check(), 1); // retried after a failed @all
+  assert.deepEqual(replies.at(-1), ['new2', '请发布']);
+});
+
+test('cicd notify: a pipeline rule @mentions extra people on its success and failure cards', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pipe-'));
+  await writeFile(join(dir, 'users.json'), JSON.stringify({ 3416: { name: '葛相麟', openId: 'ou_ge' } }));
+  const sent = [];
+  const request = async (method, url) => url.endsWith('/members')
+    ? { code: 0, data: { items: [{ name: '黄树强', member_id: 'ou_hsq' }], has_more: false } } : { code: 404 };
+  const n = createCicdNotifier({ request, chatId: 'oc', stateFile: join(dir, 'c.json'), usersFile: join(dir, 'users.json'),
+    pipelineAt: { '性能测试【Main】': ['黄树强'] }, sendCard: async (chat, card) => { sent.push(card.elements[0].text.content); return 0; } });
+  const successCard = { elements: [{ tag: 'div', text: { tag: 'lark_md', content: '包名：a.apk\n管线：性能测试【Main】-177Win\n分支：main' } }] };
+  assert.equal(cardPipeline(successCard), '性能测试【Main】-177Win');
+  await n.notifyCard({ webhook: { card: successCard }, meta: { buildUser: '3416' } });
+  assert.match(sent[0], /^<at id=ou_ge><\/at><at id=ou_hsq><\/at> 触发人：葛相麟\n/);
+  await n.notifyCard({ webhook: { card: successCard }, meta: { buildUser: '9' } }); // unknown trigger: still @ 黄树强
+  assert.match(sent[1], /^<at id=ou_hsq><\/at> 触发人：旅行者\n/);
+  await n.notify({ reason: 'x', meta: { buildUser: '3416', pipeline: '性能测试【Main】' } }, '');
+  assert.match(sent[2], /^<at id=ou_ge><\/at><at id=ou_hsq><\/at> 原因：x/);
+  await n.notify({ reason: 'x', meta: { buildUser: '3416', pipeline: '公共打包-22Win' } }, '');
+  assert.match(sent[3], /^<at id=ou_ge><\/at> 原因：x/); // other pipelines: no extra @
 });
